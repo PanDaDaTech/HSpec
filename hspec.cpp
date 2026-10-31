@@ -9,6 +9,8 @@
 #include <windowsx.h>
 #include <winioctl.h>
 #include <wincrypt.h>
+#include <objbase.h>
+#include <propidl.h>
 #include <gdiplus.h>
 #include <intrin.h>
 #include <stdio.h>
