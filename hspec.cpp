@@ -767,7 +767,6 @@ static void BuildModel(void)
 
 static ULONG_PTR g_gdiToken = 0;
 static HWND g_hwnd = NULL;
-static HWND g_parent = NULL;
 static UINT g_dpi = 96;
 static int g_winW = 420;
 static int g_winH = 320;
@@ -984,74 +983,52 @@ static void PositionWindow(void);
 
 static void Render(void)
 {
-    if (!g_hwnd) return;
-    if (RenderInternal()) return;
-
-    // Windows 7 does not support layered child windows: fall back to a
-    // bottom-most top-level window (still never topmost).
-    if (g_parent) {
-        SetParent(g_hwnd, NULL);
-        LONG_PTR style = GetWindowLongPtrW(g_hwnd, GWL_STYLE);
-        style &= ~WS_CHILD;
-        style |= WS_POPUP;
-        SetWindowLongPtrW(g_hwnd, GWL_STYLE, style);
-        g_parent = NULL;
-        PositionWindow();
-        RenderInternal();
-    }
+    if (g_hwnd) RenderInternal();
 }
 
 // ===========================================================================
-// Desktop attachment
+// Desktop layer placement
 // ===========================================================================
+//
+// A desktop widget must sit above the wallpaper/icons (Progman + WorkerW)
+// but below every ordinary window, and it must never be topmost.  The
+// reference tools (WinosInfo) use exactly this: a normal WS_POPUP layered
+// window whose z-order is anchored right above the desktop stack.
 
-struct FindWorkerCtx { HWND defView; HWND worker; };
+struct TopWindowList { HWND hwnds[512]; int count; };
 
-static BOOL CALLBACK FindWorkerProc(HWND hwnd, LPARAM lp)
+static BOOL CALLBACK CollectTopProc(HWND hwnd, LPARAM lp)
 {
-    FindWorkerCtx* c = (FindWorkerCtx*)lp;
-    HWND dv = FindWindowExW(hwnd, NULL, L"SHELLDLL_DefView", NULL);
-    if (dv) {
-        c->defView = dv;
-        c->worker = FindWindowExW(NULL, hwnd, L"WorkerW", NULL);
-        return FALSE;
-    }
+    TopWindowList* list = (TopWindowList*)lp;
+    if (list->count < 512 && IsWindowVisible(hwnd))
+        list->hwnds[list->count++] = hwnd;
     return TRUE;
 }
 
-static HWND FindDesktopWorkerW(void)
+static void SendToDesktopLayer(void)
 {
-    HWND progman = FindWindowW(L"Progman", NULL);
-    if (progman)
-        SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, NULL);
+    if (!g_hwnd) return;
 
-    HWND defView = progman ? FindWindowExW(progman, NULL, L"SHELLDLL_DefView", NULL) : NULL;
-    if (defView) {
-        HWND w = FindWindowExW(NULL, GetParent(defView), L"WorkerW", NULL);
-        if (w) return w;
+    TopWindowList list;
+    list.count = 0;
+    EnumWindows(CollectTopProc, (LPARAM)&list);
+
+    int desk = -1;
+    for (int i = 0; i < list.count; i++) {
+        wchar_t cls[64] = { 0 };
+        GetClassNameW(list.hwnds[i], cls, 64);
+        if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0)
+            desk = i;
     }
 
-    FindWorkerCtx ctx;
-    ctx.defView = NULL;
-    ctx.worker = NULL;
-    EnumWindows(FindWorkerProc, (LPARAM)&ctx);
-    if (ctx.worker) return ctx.worker;
-    if (ctx.defView) {
-        HWND w = FindWindowExW(NULL, GetParent(ctx.defView), L"WorkerW", NULL);
-        if (w) return w;
+    if (desk > 0) {
+        HWND above = list.hwnds[desk - 1];
+        if (above == g_hwnd) return;
+        SetWindowPos(g_hwnd, above, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
-    return NULL;
-}
-
-static void AttachToDesktop(void)
-{
-    g_parent = FindDesktopWorkerW();
-    if (!g_parent) return;
-    LONG_PTR style = GetWindowLongPtrW(g_hwnd, GWL_STYLE);
-    style &= ~WS_POPUP;
-    style |= WS_CHILD;
-    SetWindowLongPtrW(g_hwnd, GWL_STYLE, style);
-    SetParent(g_hwnd, g_parent);
+    SetWindowPos(g_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 static void PositionWindow(void)
@@ -1071,17 +1048,8 @@ static void PositionWindow(void)
     int y = mi.rcMonitor.top + marginY;
     if (x < mi.rcMonitor.left) x = mi.rcMonitor.left;
 
-    if (g_parent) {
-        POINT p;
-        p.x = x;
-        p.y = y;
-        MapWindowPoints(HWND_DESKTOP, g_parent, &p, 1);
-        SetWindowPos(g_hwnd, NULL, p.x, p.y, g_winW, g_winH,
-            SWP_NOZORDER | SWP_NOACTIVATE);
-    } else {
-        SetWindowPos(g_hwnd, HWND_BOTTOM, x, y, g_winW, g_winH,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    }
+    SetWindowPos(g_hwnd, NULL, x, y, g_winW, g_winH,
+        SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // ===========================================================================
@@ -1126,6 +1094,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ComputeLayout();
             PositionWindow();
             Render();
+            SendToDesktopLayer();
         }
         return 0;
 
@@ -1219,10 +1188,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
     g_dpi = GetDpiSafe(g_hwnd);
     ComputeLayout();
-    AttachToDesktop();
     PositionWindow();
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     Render();
+    SendToDesktopLayer();
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {

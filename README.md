@@ -20,7 +20,7 @@
 
 ## 特性
 
-- **桌面层显示**：窗口挂到 Explorer 的 `WorkerW` 上，位于桌面图标之后、普通窗口之下；从不使用 `WS_EX_TOPMOST`。
+- **桌面层显示**：普通顶层分层窗口，z-order 锚定在 `Progman/WorkerW` 桌面栈之上、所有普通窗口之下；从不使用 `WS_EX_TOPMOST`。
 - **逐像素透明**：GDI+ 32bpp 位图 + `UpdateLayeredWindow`，文字抗锯齿，无白底、无边框。
 - **零第三方依赖**：不使用 WMI、PowerShell、`msinfo32`、`wmic`，不释放任何临时文件。
 - **单文件源码**：`hspec.cpp` 一个翻译单元；资源只有图标、manifest 和版本信息。
