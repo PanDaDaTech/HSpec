@@ -308,7 +308,7 @@ static int GetPhysicalCores(void)
     if (GetLogicalProcessorInformationEx(RelationProcessorCore,
             (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)buf, &len)) {
         DWORD off = 0;
-        while (off + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= len) {
+        while (off + 8 <= len) {
             SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX* e =
                 (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*)(buf + off);
             if (e->Relationship == RelationProcessorCore) count++;
@@ -701,6 +701,17 @@ static void BuildModel(void)
     ms.dwLength = sizeof(ms);
     GlobalMemoryStatusEx(&ms);
 
+    unsigned long long smbTotal = 0;
+    for (int i = 0; i < g_smbios.memCount; i++) smbTotal += g_smbios.mem[i].bytes;
+
+    unsigned long long totalBytes = smbTotal;
+    if (totalBytes == 0) {
+        ULONGLONG installedKb = 0;
+        if (GetPhysicallyInstalledSystemMemory(&installedKb) && installedKb > 0)
+            totalBytes = installedKb * 1024ULL;
+    }
+    if (totalBytes == 0) totalBytes = ms.ullTotalPhys;
+
     wchar_t memTitle[256];
     const wchar_t* memType = L"";
     const wchar_t* firstPart = L"";
@@ -711,7 +722,7 @@ static void BuildModel(void)
         firstPart = g_smbios.mem[0].part;
         firstSpeed = g_smbios.mem[0].speed;
     }
-    double totalGb = (double)ms.ullTotalPhys / 1073741824.0;
+    double totalGb = (double)totalBytes / 1073741824.0;
     if (memType[0])
         WPrintf(memTitle, 256, L"内存: %.0f GB %s", totalGb, memType);
     else
@@ -719,24 +730,23 @@ static void BuildModel(void)
 
     r = ModelAddRow(ICON_RAM, memTitle);
 
-    wchar_t memDetail[256] = { 0 };
-    if (firstPart[0])
+    if (firstPart[0]) {
+        wchar_t memDetail[256] = { 0 };
         wcsncpy_s(memDetail, 256, firstPart, _TRUNCATE);
-    else
-        wcscpy_s(memDetail, 256, L"未知");
-    if (g_smbios.memCount > 1 && g_smbios.mem[1].part[0]
-        && wcscmp(g_smbios.mem[1].part, firstPart) != 0) {
-        wcscat_s(memDetail, 256, L" / ");
-        wcsncat_s(memDetail, 256, g_smbios.mem[1].part, _TRUNCATE);
-    }
-    if (firstSpeed > 0) {
-        wchar_t d[320];
-        WPrintf(d, 320, L"型号: %s    %d MHz", memDetail, firstSpeed);
-        ModelAddDetail(r, d);
-    } else {
-        wchar_t d[320];
-        WPrintf(d, 320, L"型号: %s", memDetail);
-        ModelAddDetail(r, d);
+        if (g_smbios.memCount > 1 && g_smbios.mem[1].part[0]
+            && wcscmp(g_smbios.mem[1].part, firstPart) != 0) {
+            wcscat_s(memDetail, 256, L" / ");
+            wcsncat_s(memDetail, 256, g_smbios.mem[1].part, _TRUNCATE);
+        }
+        if (firstSpeed > 0) {
+            wchar_t d[320];
+            WPrintf(d, 320, L"型号: %s    %d MHz", memDetail, firstSpeed);
+            ModelAddDetail(r, d);
+        } else {
+            wchar_t d[320];
+            WPrintf(d, 320, L"型号: %s", memDetail);
+            ModelAddDetail(r, d);
+        }
     }
 
     // ---- Disks ----
@@ -772,10 +782,89 @@ static int g_winW = 420;
 static int g_winH = 320;
 static wchar_t g_fontName[64] = L"Microsoft YaHei UI";
 
-static const Gdiplus::Color kTitleColor(255, 26, 26, 26);
-static const Gdiplus::Color kDetailColor(255, 72, 72, 72);
-static const Gdiplus::Color kIconColor(255, 38, 38, 38);
-static const Gdiplus::Color kHaloColor(150, 255, 255, 255);
+static const Gdiplus::Color kTitleColorDark(255, 26, 26, 26);
+static const Gdiplus::Color kDetailColorDark(255, 58, 58, 58);
+static const Gdiplus::Color kIconColorDark(255, 38, 38, 38);
+static const Gdiplus::Color kHaloColorDark(170, 255, 255, 255);
+static const Gdiplus::Color kTitleColorLight(255, 245, 245, 245);
+static const Gdiplus::Color kDetailColorLight(255, 205, 205, 205);
+static const Gdiplus::Color kIconColorLight(255, 235, 235, 235);
+static const Gdiplus::Color kHaloColorLight(170, 0, 0, 0);
+
+static bool g_lightText = false;
+static Gdiplus::Color g_titleColor = kTitleColorDark;
+static Gdiplus::Color g_detailColor = kDetailColorDark;
+static Gdiplus::Color g_iconColor = kIconColorDark;
+static Gdiplus::Color g_haloColor = kHaloColorDark;
+
+static void ApplyPalette(void)
+{
+    if (g_lightText) {
+        g_titleColor = kTitleColorLight;
+        g_detailColor = kDetailColorLight;
+        g_iconColor = kIconColorLight;
+        g_haloColor = kHaloColorLight;
+    } else {
+        g_titleColor = kTitleColorDark;
+        g_detailColor = kDetailColorDark;
+        g_iconColor = kIconColorDark;
+        g_haloColor = kHaloColorDark;
+    }
+}
+
+// Pick dark or light text from the wallpaper brightness behind the panel.
+static void UpdateTheme(void)
+{
+    wchar_t path[MAX_PATH] = { 0 };
+    RegStrW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallPaper", path, MAX_PATH);
+    if (!path[0]) {
+        wchar_t appdata[MAX_PATH] = { 0 };
+        DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+        if (n > 0 && n < MAX_PATH)
+            WPrintf(path, MAX_PATH, L"%s\\Microsoft\\Windows\\Themes\\TranscodedWallpaper",
+                appdata);
+    }
+    if (!path[0]) return;
+
+    Gdiplus::Bitmap img(path);
+    if (img.GetLastStatus() != Gdiplus::Ok) return;
+    int iw = (int)img.GetWidth();
+    int ih = (int)img.GetHeight();
+    if (iw <= 0 || ih <= 0) return;
+
+    POINT origin = { 0, 0 };
+    MONITORINFO mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi);
+
+    double s = (double)g_dpi / 96.0;
+    int x = mi.rcMonitor.right - g_winW - (int)(18.0 * s + 0.5);
+    int y = mi.rcMonitor.top + (int)(22.0 * s + 0.5);
+    int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+    int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    if (mw <= 0 || mh <= 0) return;
+
+    double sx = (double)iw / mw;
+    double sy = (double)ih / mh;
+    double sum = 0;
+    int cnt = 0;
+    for (int gy = 0; gy < 10; gy++) {
+        for (int gx = 0; gx < 10; gx++) {
+            int px = (int)((x + (gx + 0.5) * g_winW / 10.0) * sx);
+            int py = (int)((y + (gy + 0.5) * g_winH / 10.0) * sy);
+            if (px < 0 || py < 0 || px >= iw || py >= ih) continue;
+            Gdiplus::Color c;
+            img.GetPixel(px, py, &c);
+            sum += (c.GetR() * 299 + c.GetG() * 587 + c.GetB() * 114) / 1000.0;
+            cnt++;
+        }
+    }
+    if (cnt > 0) {
+        g_lightText = (sum / cnt) < 118.0;
+        ApplyPalette();
+    }
+}
 
 static void PickFont(void)
 {
@@ -926,10 +1015,10 @@ static bool RenderInternal(void)
         Gdiplus::UnitPixel);
     Gdiplus::Font fontDetail(&family, (Gdiplus::REAL)(13.2 * s), Gdiplus::FontStyleRegular,
         Gdiplus::UnitPixel);
-    Gdiplus::SolidBrush brushTitle(kTitleColor);
-    Gdiplus::SolidBrush brushDetail(kDetailColor);
-    Gdiplus::SolidBrush brushHalo(kHaloColor);
-    Gdiplus::Pen pen(kIconColor, (Gdiplus::REAL)(1.5 * s));
+    Gdiplus::SolidBrush brushTitle(g_titleColor);
+    Gdiplus::SolidBrush brushDetail(g_detailColor);
+    Gdiplus::SolidBrush brushHalo(g_haloColor);
+    Gdiplus::Pen pen(g_iconColor, (Gdiplus::REAL)(1.5 * s));
     pen.SetLineJoin(Gdiplus::LineJoinRound);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
@@ -1047,8 +1136,10 @@ static void SendToDesktopLayer(void)
     for (int i = 0; i < list.count; i++) {
         wchar_t cls[64] = { 0 };
         GetClassNameW(list.hwnds[i], cls, 64);
-        if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0)
+        if (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0) {
             desk = i;
+            break;  // topmost desktop-layer window (icons/wallpaper stack)
+        }
     }
 
     if (desk > 0) {
@@ -1116,14 +1207,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_CREATE:
         SetTimer(hwnd, 1, 60000, NULL);
+        SetTimer(hwnd, 2, 800, NULL);
         return 0;
 
     case WM_TIMER:
         if (wParam == 1) {
             BuildModel();
             ComputeLayout();
+            UpdateTheme();
             PositionWindow();
             Render();
+            SendToDesktopLayer();
+        } else if (wParam == 2) {
+            // "Show desktop" hides ordinary top-level windows and raises the
+            // desktop WorkerW stack; a desktop widget should stay on the
+            // wallpaper, so restore it and keep it anchored above that stack.
+            if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                PositionWindow();
+                Render();
+            }
             SendToDesktopLayer();
         }
         return 0;
@@ -1134,6 +1237,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
+
+    // Desktop widgets must survive "Show desktop" (Win+D), which minimizes
+    // every top-level window.
+    case WM_SYSCOMMAND:
+        if ((wParam & 0xFFF0) == SC_MINIMIZE) return 0;
+        break;
+
+    case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) {
+            PostMessageW(hwnd, WM_APP + 1, 0, 0);
+            return 0;
+        }
+        break;
+
+    case WM_APP + 1:
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        PositionWindow();
+        Render();
+        SendToDesktopLayer();
+        return 0;
 
     case WM_ERASEBKGND:
         return 1;
@@ -1146,6 +1269,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_SETTINGCHANGE:
+        UpdateTheme();
         Render();
         return 0;
 
@@ -1165,6 +1289,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY:
         KillTimer(hwnd, 1);
+        KillTimer(hwnd, 2);
         g_hwnd = NULL;
         PostQuitMessage(0);
         return 0;
@@ -1218,6 +1343,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
     g_dpi = GetDpiSafe(g_hwnd);
     ComputeLayout();
+    UpdateTheme();
     PositionWindow();
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     Render();

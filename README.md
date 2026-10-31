@@ -20,12 +20,13 @@
 
 ## 特性
 
-- **桌面层显示**：普通顶层分层窗口，z-order 锚定在 `Progman/WorkerW` 桌面栈之上、所有普通窗口之下；从不使用 `WS_EX_TOPMOST`。
+- **桌面层显示**：普通顶层分层窗口，z-order 锚定在 `Progman/WorkerW` 桌面栈之上、所有普通窗口之下；从不使用 `WS_EX_TOPMOST`，按 `Win+D` 后也会自动回到桌面。
 - **逐像素透明**：GDI+ 32bpp 位图 + `UpdateLayeredWindow`，文字抗锯齿，无白底、无边框。
+- **自动明暗**：读取壁纸并采样面板区域的亮度，深色壁纸自动切换为浅色文字，浅色壁纸用深色文字。
 - **零第三方依赖**：不使用 WMI、PowerShell、`msinfo32`、`wmic`，不释放任何临时文件。
 - **单文件源码**：`hspec.cpp` 一个翻译单元；资源只有图标、manifest 和版本信息。
 - **多架构**：x64 / x86 / arm64，GitHub Actions 全量编译。
-- **Win7+**：不依赖 XP；Win7 上自动退化为底层的普通分层窗口（仍不置顶）。
+- **Win7+**：不依赖 XP；使用 `UpdateLayeredWindow` 实现逐像素透明。
 
 ## 硬件信息是怎么采集的
 
@@ -35,7 +36,8 @@
 | :--- | :--- | :--- |
 | CPU 名称 | 注册表 + CPUID 兜底 | `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0\ProcessorNameString`，`__cpuid(0x80000002..4)` |
 | 核心 / 线程 | 拓扑枚举 | `GetLogicalProcessorInformationEx(RelationProcessorCore)`、`GetActiveProcessorCount` |
-| 主板 / BIOS / 内存条 | SMBIOS 原始表 | `GetSystemFirmwareTable('RSMB', 0, ...)`，解析 Type 0/1/2/4/17 |
+| 主板 / BIOS / 内存条 | SMBIOS 原始表，注册表兜底 | `GetSystemFirmwareTable('RSMB', 0, ...)`，解析 Type 0/1/2/4/17；`HKLM\HARDWARE\DESCRIPTION\System\BIOS` |
+| 内存总量 | 系统 | `GetPhysicallyInstalledSystemMemory`（已安装），`GlobalMemoryStatusEx`（可用量兜底） |
 | 固件类型 | 内核 + 注册表兜底 | `GetFirmwareType()`（动态加载），`PEFirmwareType` |
 | 安全启动状态 | 注册表 / UEFI 变量 | `...\Control\SecureBoot\State\UEFISecureBootEnabled`，`GetFirmwareEnvironmentVariableW` |
 | 安全启动证书 | UEFI `db` / `dbx` | 解析 `EFI_SIGNATURE_LIST` → X.509 → `CertGetNameStringW` |
