@@ -952,9 +952,39 @@ static bool RenderInternal(void)
         y += (float)g_rowGap;
     }
 
-    HBITMAP hbm = NULL;
-    if (bmp.GetHBITMAP(Gdiplus::Color(0, 0, 0, 0), &hbm) != Gdiplus::Ok || !hbm)
+    // Bitmap::GetHBITMAP() drops the alpha channel for PARGB bitmaps, so copy
+    // the premultiplied pixels into our own 32bpp top-down DIB section.
+    Gdiplus::BitmapData bd;
+    Gdiplus::Rect lockRect(0, 0, g_winW, g_winH);
+    if (bmp.LockBits(&lockRect, Gdiplus::ImageLockModeRead,
+            PixelFormat32bppPARGB, &bd) != Gdiplus::Ok)
         return false;
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = g_winW;
+    bi.bmiHeader.biHeight = -g_winH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = NULL;
+    HBITMAP hbm = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hbm && bits) {
+        const BYTE* src = (const BYTE*)bd.Scan0;
+        int rowBytes = g_winW * 4;
+        if (bd.Stride < 0) {
+            for (int y = 0; y < g_winH; y++)
+                memcpy((BYTE*)bits + y * rowBytes,
+                    src + (g_winH - 1 - y) * (-bd.Stride), rowBytes);
+        } else {
+            for (int y = 0; y < g_winH; y++)
+                memcpy((BYTE*)bits + y * rowBytes, src + y * bd.Stride, rowBytes);
+        }
+    }
+    bmp.UnlockBits(&bd);
+    if (!hbm) return false;
 
     HDC screen = GetDC(NULL);
     HDC mem = CreateCompatibleDC(screen);
