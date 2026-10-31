@@ -44,9 +44,10 @@
 | 硬盘型号 / 总线 | 物理磁盘 | `\\.\PhysicalDriveN` + `IOCTL_STORAGE_QUERY_PROPERTY` |
 | 容量 | 物理磁盘 | `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`（免管理员） |
 | 分区格式 | 物理磁盘 | `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` → MBR / GPT / RAW |
-| 内存总量 | 系统 | `GlobalMemoryStatusEx` |
 
 > 证书一项需要管理员权限（`SeSystemEnvironmentPrivilege` 才能读 UEFI `db`）。程序以 `asInvoker` 启动：普通权限下仍然显示“启动: UEFI (Secure Boot)”，只是省略证书行；在 WinPE / SYSTEM 下会完整显示。硬盘信息使用 `FILE_ANY_ACCESS` 的 geometry / property / layout IOCTL，**不需要管理员**。
+>
+> 内存条型号来自 SMBIOS Type 17。若系统禁用了固件表接口（部分虚拟机/精简系统），会自动降级为只显示已安装总量。
 
 ## 使用
 
