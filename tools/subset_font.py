@@ -10,10 +10,13 @@ The full MiSans-Medium.ttf (~8 MB) is not committed. Pass its path with
 Collected characters:
   1. every character in hspec.cpp string/char literals (all UI labels);
   2. printable ASCII 0x20-0x7E;
-  3. GB2312 level-1 common Chinese (device names / OEM strings), unless
-     --no-common is given.
+  3. characters from tools/hardware_words.txt (Chinese vendor names and
+     hardware vocabulary), unless --minimal is given.
+
+At runtime, any dynamic line containing a character outside this set is
+drawn with the system CJK font instead (per-line fallback), so nothing is
+ever rendered as tofu.
 """
-import re
 import sys
 from pathlib import Path
 
@@ -21,6 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "hspec.cpp"
 TTF_OUT = ROOT / "winres" / "MiSans-Medium.ttf"
 TTF_FULL = ROOT / "build" / "font-backup" / "MiSans-Medium.ttf"
+HARDWARE = ROOT / "tools" / "hardware_words.txt"
 
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'",
            "0": "\0", "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
@@ -86,22 +90,19 @@ def source_chars(text):
     return out
 
 
-def gb2312_level1():
+def hardware_chars():
     out = set()
-    for hi in range(0xB0, 0xD8):
-        for lo in range(0xA1, 0xFF):
-            try:
-                out.add(bytes((hi, lo)).decode("gb2312"))
-            except UnicodeDecodeError:
-                pass
+    if HARDWARE.exists():
+        out |= {c for c in HARDWARE.read_text(encoding="utf-8", errors="replace")
+                if ord(c) >= 0x80}
     return out
 
 
-def collect(include_common):
+def collect(include_hardware):
     chars = {chr(c) for c in range(0x20, 0x7F)}
     chars |= source_chars(SRC.read_text(encoding="utf-8", errors="replace"))
-    if include_common:
-        chars |= gb2312_level1()
+    if include_hardware:
+        chars |= hardware_chars()
     chars -= set("\r\n\t\0")
     return chars
 
@@ -117,12 +118,12 @@ def main():
     from fontTools.ttLib import TTFont
 
     check_only = "--check" in sys.argv
-    include_common = "--no-common" not in sys.argv
+    include_hardware = "--minimal" not in sys.argv
     full = TTF_FULL
     if "--full" in sys.argv:
         full = Path(sys.argv[sys.argv.index("--full") + 1])
 
-    chars = collect(include_common)
+    chars = collect(include_hardware)
     print("UI chars: %d" % len(chars))
 
     if check_only:

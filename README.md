@@ -23,7 +23,7 @@
 - **桌面层显示**：普通顶层分层窗口，z-order 锚定在 `Progman/WorkerW` 桌面栈之上、所有普通窗口之下；从不使用 `WS_EX_TOPMOST`，按 `Win+D` 后也会自动回到桌面。
 - **逐像素透明**：GDI+ 32bpp 位图 + `UpdateLayeredWindow`，文字抗锯齿，无白底、无边框；面板本身点击穿透。
 - **自动明暗**：读取当前壁纸（`SPI_GETDESKWALLPAPER`）并采样面板区域的亮度，深色壁纸自动切换为浅色文字，浅色壁纸用深色文字；壁纸切换后 1 秒内自动更新。
-- **内嵌 MiSans**：MiSans Medium 子集（ASCII + 界面文案 + GB2312 一级常用字，约 840 KB），100% DPI 下使用 `AntiAliasGridFit`，避免小字号发糊。
+- **内嵌 MiSans**：MiSans Medium 子集（ASCII + 界面文案 + 硬件/厂商常用字，约 172 KB）。文本用 **GDI ClearType** 渲染后再提取 alpha，100% DPI 下也保持锐利；子集外的生僻字整行自动回退系统字体，不会出现方块。
 - **托盘图标**：右键或双击托盘图标打开菜单（刷新 / 退出）；面板本身不再响应鼠标。
 - **自动刷新**：设备增删（`WM_DEVICECHANGE`）、壁纸切换、分辨率/DPI 变化都会自动重建信息。
 - **零第三方依赖**：不使用 WMI、PowerShell、`msinfo32`、`wmic`，不释放任何临时文件。
@@ -70,12 +70,14 @@ build.cmd
 
 CI 每次 push 自动编译 x64 / x86 / arm64 并上传 artifact，见 `.github/workflows/build.yml`。
 
-字体子集已入库（`winres/MiSans-Medium.ttf`）。如需重建（新增界面文案后）：
+字体子集已入库（`winres/MiSans-Medium.ttf`）。如需重建（新增界面文案 / 厂商字后）：
 
 ```cmd
 python tools/subset_font.py --full <完整 MiSans-Medium.ttf>
 python tools/subset_font.py --check
 ```
+
+`tools/hardware_words.txt` 维护中文厂商与硬件词汇；新增品牌名后重跑子集即可。`--minimal` 只保留界面文案与 ASCII。
 
 手动编译命令：
 

@@ -783,8 +783,6 @@ static HWND g_hwnd = NULL;
 static UINT g_dpi = 96;
 static int g_winW = 420;
 static int g_winH = 320;
-static wchar_t g_fontName[64] = L"Microsoft YaHei UI";
-static Gdiplus::PrivateFontCollection* g_gdipFonts = NULL;
 static bool g_fontReady = false;
 static HANDLE g_fontReg = NULL;
 static ULONGLONG g_wallpaperStamp = 0;
@@ -795,17 +793,14 @@ static UINT g_taskbarCreatedMsg = 0;
 static const Gdiplus::Color kTitleColorDark(255, 26, 26, 26);
 static const Gdiplus::Color kDetailColorDark(255, 58, 58, 58);
 static const Gdiplus::Color kIconColorDark(255, 38, 38, 38);
-static const Gdiplus::Color kHaloColorDark(170, 255, 255, 255);
 static const Gdiplus::Color kTitleColorLight(255, 245, 245, 245);
 static const Gdiplus::Color kDetailColorLight(255, 205, 205, 205);
 static const Gdiplus::Color kIconColorLight(255, 235, 235, 235);
-static const Gdiplus::Color kHaloColorLight(170, 0, 0, 0);
 
 static bool g_lightText = false;
 static Gdiplus::Color g_titleColor = kTitleColorDark;
 static Gdiplus::Color g_detailColor = kDetailColorDark;
 static Gdiplus::Color g_iconColor = kIconColorDark;
-static Gdiplus::Color g_haloColor = kHaloColorDark;
 
 static void ApplyPalette(void)
 {
@@ -813,12 +808,10 @@ static void ApplyPalette(void)
         g_titleColor = kTitleColorLight;
         g_detailColor = kDetailColorLight;
         g_iconColor = kIconColorLight;
-        g_haloColor = kHaloColorLight;
     } else {
         g_titleColor = kTitleColorDark;
         g_detailColor = kDetailColorDark;
         g_iconColor = kIconColorDark;
-        g_haloColor = kHaloColorDark;
     }
 }
 
@@ -945,29 +938,7 @@ static void LoadEmbeddedFont(HINSTANCE inst)
     HANDLE reg = AddFontMemResourceEx(data, sz, NULL, &n);
     if (!reg || n == 0) return;
     g_fontReg = reg;
-
-    g_gdipFonts = new Gdiplus::PrivateFontCollection();
-    if (!g_gdipFonts ||
-        g_gdipFonts->AddMemoryFont(data, (INT)sz) != Gdiplus::Ok) {
-        delete g_gdipFonts;
-        g_gdipFonts = NULL;
-        return;
-    }
     g_fontReady = true;
-}
-
-static void PickFont(void)
-{
-    static const wchar_t* names[] = {
-        L"Microsoft YaHei UI", L"Microsoft YaHei", L"Segoe UI", L"SimSun"
-    };
-    for (int i = 0; i < 4; i++) {
-        Gdiplus::FontFamily f(names[i]);
-        if (f.GetLastStatus() == Gdiplus::Ok && f.IsAvailable()) {
-            wcsncpy_s(g_fontName, 64, names[i], _TRUNCATE);
-            return;
-        }
-    }
 }
 
 static UINT GetDpiSafe(HWND hwnd)
@@ -994,8 +965,8 @@ static void ComputeLayout(void)
     double s = (double)g_dpi / 96.0;
     g_iconSize = (int)(24.0 * s + 0.5);
     g_gapX = (int)(10.0 * s + 0.5);
-    g_titleH = (int)(24.0 * s + 0.5);
-    g_detailH = (int)(21.0 * s + 0.5);
+    g_titleH = (int)(26.0 * s + 0.5);
+    g_detailH = (int)(22.0 * s + 0.5);
     g_rowGap = (int)(9.0 * s + 0.5);
     g_padTop = (int)(4.0 * s + 0.5);
     g_winW = (int)(388.0 * s + 0.5);
@@ -1069,21 +1040,129 @@ static void DrawGlyph(Gdiplus::Graphics& g, Gdiplus::Pen& pen, int kind,
     }
 }
 
-static void DrawTextLine(Gdiplus::Graphics& g, const wchar_t* text, Gdiplus::Font* font,
-    Gdiplus::Brush* fg, Gdiplus::Brush* halo, float x, float y, float w, float h, float s)
+// True when the font can draw every character in the line.  Used to fall
+// back to a system CJK font for dynamic strings outside the embedded subset.
+static bool FontCoversText(HDC dc, HFONT hf, const wchar_t* text)
 {
-    Gdiplus::StringFormat fmt;
-    fmt.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-    fmt.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
-    fmt.SetAlignment(Gdiplus::StringAlignmentNear);
-    fmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    HGDIOBJ old = SelectObject(dc, hf);
+    bool ok = true;
+    WORD glyphs[128];
+    const wchar_t* p = text;
+    while (*p) {
+        int n = (int)wcslen(p);
+        if (n > 128) n = 128;
+        if (GetGlyphIndicesW(dc, p, n, glyphs, GGI_MARK_NONEXISTING_GLYPHS) == GDI_ERROR) {
+            ok = false;
+            break;
+        }
+        for (int i = 0; i < n; i++) {
+            if (glyphs[i] == 0xFFFF) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) break;
+        p += n;
+    }
+    SelectObject(dc, old);
+    return ok;
+}
 
-    float d = 1.0f * s;
-    g.DrawString(text, -1, font, Gdiplus::RectF(x - d, y, w, h), &fmt, halo);
-    g.DrawString(text, -1, font, Gdiplus::RectF(x + d, y, w, h), &fmt, halo);
-    g.DrawString(text, -1, font, Gdiplus::RectF(x, y - d, w, h), &fmt, halo);
-    g.DrawString(text, -1, font, Gdiplus::RectF(x, y + d, w, h), &fmt, halo);
-    g.DrawString(text, -1, font, Gdiplus::RectF(x, y, w, h), &fmt, fg);
+// Render one text line with GDI ClearType on an opaque mask, derive the
+// per-pixel alpha from the luminance difference, then composite the
+// premultiplied result.  This matches the crispness of native static
+// controls (WinosInfo) while keeping the layered window transparent.
+static void DrawTextGdiLine(Gdiplus::Graphics& g, const wchar_t* text, int px,
+    int weight, const Gdiplus::Color& color, bool lightText,
+    int x, int y, int w, int h)
+{
+    if (!text || !text[0] || w <= 0 || h <= 0) return;
+
+    BITMAPINFO bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = GetDC(NULL);
+    HDC dc = CreateCompatibleDC(screen);
+    ReleaseDC(NULL, screen);
+    if (!dc) return;
+
+    void* bits = NULL;
+    HBITMAP hbm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hbm || !bits) {
+        DeleteDC(dc);
+        return;
+    }
+
+    BYTE bg = lightText ? 0 : 255;
+    {
+        DWORD fill = (DWORD)bg | ((DWORD)bg << 8) | ((DWORD)bg << 16) | 0xFF000000u;
+        DWORD* p = (DWORD*)bits;
+        int total = w * h;
+        for (int i = 0; i < total; i++) p[i] = fill;
+    }
+
+    HBITMAP oldBmp = (HBITMAP)SelectObject(dc, hbm);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(color.GetR(), color.GetG(), color.GetB()));
+    HFONT hf = CreateFontW(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+        g_fontReady ? L"MiSans" : L"Microsoft YaHei");
+    if (g_fontReady && hf && !FontCoversText(dc, hf, text)) {
+        DeleteObject(hf);
+        hf = CreateFontW(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
+    }
+    if (!hf) {
+        SelectObject(dc, oldBmp);
+        DeleteObject(hbm);
+        DeleteDC(dc);
+        return;
+    }
+    HGDIOBJ oldFont = SelectObject(dc, hf);
+    RECT rect;
+    rect.left = 0;
+    rect.top = 0;
+    rect.right = w;
+    rect.bottom = h;
+    DrawTextW(dc, text, -1, &rect,
+        DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+    DeleteObject(hf);
+
+    int bl = bg;
+    int fl = (color.GetR() * 299 + color.GetG() * 587 + color.GetB() * 114) / 1000;
+    int denom = bl - fl;
+    if (denom == 0) denom = 1;
+
+    BYTE* p = (BYTE*)bits;
+    int total = w * h;
+    for (int i = 0; i < total; i++) {
+        BYTE* q = p + i * 4;
+        int lum = (q[2] * 299 + q[1] * 587 + q[0] * 114) / 1000;
+        int a = (bl - lum) * 255 / denom;
+        if (a < 0) a = 0;
+        if (a > 255) a = 255;
+        q[0] = (BYTE)(color.GetB() * a / 255);
+        q[1] = (BYTE)(color.GetG() * a / 255);
+        q[2] = (BYTE)(color.GetR() * a / 255);
+        q[3] = (BYTE)a;
+    }
+
+    Gdiplus::Bitmap line(w, h, w * 4, PixelFormat32bppPARGB, (BYTE*)bits);
+    if (line.GetLastStatus() == Gdiplus::Ok)
+        g.DrawImage(&line, x, y);
+
+    SelectObject(dc, oldBmp);
+    DeleteObject(hbm);
+    DeleteDC(dc);
 }
 
 static bool RenderInternal(void)
@@ -1095,27 +1174,19 @@ static bool RenderInternal(void)
     if (bmp.GetLastStatus() != Gdiplus::Ok) return false;
     Gdiplus::Graphics g(&bmp);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    // Small fonts at 100% DPI look soft with plain AntiAlias; GridFit keeps
-    // them crisp. At 150%+ the unhinted strokes are more faithful.
-    g.SetTextRenderingHint(s >= 1.5 ? Gdiplus::TextRenderingHintAntiAlias
-                                    : Gdiplus::TextRenderingHintAntiAliasGridFit);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
     g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
-    Gdiplus::FontFamily family(g_fontReady ? L"MiSans" : g_fontName,
-        g_fontReady ? g_gdipFonts : NULL);
-    Gdiplus::Font fontTitle(&family, (Gdiplus::REAL)(15.0 * s), Gdiplus::FontStyleBold,
-        Gdiplus::UnitPixel);
-    Gdiplus::Font fontDetail(&family, (Gdiplus::REAL)(13.2 * s), Gdiplus::FontStyleRegular,
-        Gdiplus::UnitPixel);
-    Gdiplus::SolidBrush brushTitle(g_titleColor);
-    Gdiplus::SolidBrush brushDetail(g_detailColor);
-    Gdiplus::SolidBrush brushHalo(g_haloColor);
     Gdiplus::Pen pen(g_iconColor, (Gdiplus::REAL)(1.5 * s));
     pen.SetLineJoin(Gdiplus::LineJoinRound);
     pen.SetStartCap(Gdiplus::LineCapRound);
     pen.SetEndCap(Gdiplus::LineCapRound);
+
+    int titlePx = (int)(16.0 * s + 0.5);
+    int detailPx = (int)(14.0 * s + 0.5);
+    if (titlePx < 10) titlePx = 10;
+    if (detailPx < 9) detailPx = 9;
 
     float y = (float)g_padTop;
     float textX = (float)(g_iconSize + g_gapX);
@@ -1124,12 +1195,12 @@ static bool RenderInternal(void)
     for (int i = 0; i < g_rowCount; i++) {
         UiRow& row = g_rows[i];
         DrawGlyph(g, pen, row.icon, 1.0f * (float)s, y, (float)g_iconSize, (float)s);
-        DrawTextLine(g, row.title, &fontTitle, &brushTitle, &brushHalo,
-            textX, y, textW, (float)g_titleH, (float)s);
+        DrawTextGdiLine(g, row.title, titlePx, FW_BOLD, g_titleColor, g_lightText,
+            (int)textX, (int)y, (int)textW, g_titleH);
         y += (float)g_titleH;
         for (int j = 0; j < row.detailCount; j++) {
-            DrawTextLine(g, row.details[j], &fontDetail, &brushDetail, &brushHalo,
-                textX, y, textW, (float)g_detailH, (float)s);
+            DrawTextGdiLine(g, row.details[j], detailPx, FW_NORMAL, g_detailColor,
+                g_lightText, (int)textX, (int)y, (int)textW, g_detailH);
             y += (float)g_detailH;
         }
         y += (float)g_rowGap;
@@ -1478,7 +1549,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
     LoadEmbeddedFont(hInstance);
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
-    PickFont();
     BuildModel();
 
     WNDCLASSEXW wc;
@@ -1524,8 +1594,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         RemoveFontMemResourceEx(g_fontReg);
         g_fontReg = NULL;
     }
-    delete g_gdipFonts;
-    g_gdipFonts = NULL;
     Gdiplus::GdiplusShutdown(g_gdiToken);
     return 0;
 }
