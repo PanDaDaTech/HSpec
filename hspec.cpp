@@ -479,6 +479,28 @@ struct DiskInfo
     unsigned long long bytes;
 };
 
+// Localize a few well-known disk vendors in the model string.
+static void LocalizeDiskVendor(wchar_t* model)
+{
+    static const wchar_t* kHynix[] = {
+        L"SKHynix", L"SK hynix", L"SK Hynix", L"SK_Hynix", L"Hynix"
+    };
+    for (int i = 0; i < 5; i++) {
+        const wchar_t* key = kHynix[i];
+        size_t n = wcslen(key);
+        if (_wcsnicmp(model, key, n) != 0) continue;
+        const wchar_t* rest = model + n;
+        while (*rest == L'_' || *rest == L' ' || *rest == L'-') rest++;
+        wchar_t tmp[160];
+        if (*rest)
+            WPrintf(tmp, 160, L"海力士 %s", rest);
+        else
+            wcscpy_s(tmp, 160, L"海力士");
+        wcsncpy_s(model, 160, tmp, _TRUNCATE);
+        return;
+    }
+}
+
 static const wchar_t* BusTypeName(STORAGE_BUS_TYPE t)
 {
     switch (t) {
@@ -579,6 +601,7 @@ static int EnumDisks(DiskInfo* out, int cap)
         }
 
         if (!di.model[0]) wcscpy_s(di.model, 160, L"Disk");
+        LocalizeDiskVendor(di.model);
         out[count++] = di;
         CloseHandle(h);
     }
