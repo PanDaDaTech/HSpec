@@ -554,33 +554,28 @@ static int GetSecureBootState(void)
 static const GUID kEfiCertX509 =
     { 0xa5c059a1, 0x94e4, 0x4aa7, { 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72 } };
 
-static bool CertNameToLabel(const wchar_t* cn, wchar_t* out, int cap)
+// Returns the currently installed Secure Boot CA generation (2023 preferred,
+// otherwise 2011). Only the allowed-signature database (db) is inspected;
+// dbx contains revoked certificates and must not be reported as current.
+static bool CollectBootCert(wchar_t* out, int cap)
 {
-    if (!cn || !cn[0]) return false;
-    if (wcsstr(cn, L"2011")) { WPrintf(out, (size_t)cap, L"Pca 2011"); return true; }
-    if (wcsstr(cn, L"2023")) { WPrintf(out, (size_t)cap, L"Pca 2023"); return true; }
-    wcsncpy_s(out, (size_t)cap, cn, _TRUNCATE);
-    return true;
-}
-
-static int CollectBootCerts(wchar_t labels[][64], int cap)
-{
-    if (!EnablePrivilege(L"SeSystemEnvironmentPrivilege")) return 0;
+    if (!out || cap <= 0) return false;
+    out[0] = 0;
+    if (!EnablePrivilege(L"SeSystemEnvironmentPrivilege")) return false;
 
     const DWORD kBufSize = 128 * 1024;
     BYTE* buf = (BYTE*)malloc(kBufSize);
-    if (!buf) return 0;
+    if (!buf) return false;
 
-    int count = 0;
-    const wchar_t* vars[2] = { L"db", L"dbx" };
-    for (int vi = 0; vi < 2 && count < cap; vi++) {
-        SetLastError(ERROR_SUCCESS);
-        DWORD n = GetFirmwareEnvironmentVariableW(vars[vi],
-            L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}", buf, kBufSize);
-        if (n == 0 || n > kBufSize) continue;
+    bool has2011 = false, has2023 = false;
+    wchar_t other[64] = { 0 };
 
+    SetLastError(ERROR_SUCCESS);
+    DWORD n = GetFirmwareEnvironmentVariableW(L"db",
+        L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}", buf, kBufSize);
+    if (n > 0 && n <= kBufSize) {
         DWORD off = 0;
-        while (off + 28 <= n && count < cap) {
+        while (off + 28 <= n) {
             const BYTE* list = buf + off;
             UINT32 listSize = *(UINT32*)(list + 16);
             UINT32 hdrSize = *(UINT32*)(list + 20);
@@ -592,7 +587,7 @@ static int CollectBootCerts(wchar_t labels[][64], int cap)
             DWORD p = off + 28 + hdrSize;
             DWORD listEnd = off + listSize;
 
-            while (p + sigSize <= listEnd && count < cap) {
+            while (p + sigSize <= listEnd) {
                 if (IsEqualGUID(type, kEfiCertX509)) {
                     PCCERT_CONTEXT cert = CertCreateCertificateContext(
                         X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, buf + p, sigSize);
@@ -600,13 +595,10 @@ static int CollectBootCerts(wchar_t labels[][64], int cap)
                         wchar_t cn[256] = { 0 };
                         CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL,
                             cn, 256);
-                        wchar_t label[64] = { 0 };
-                        if (CertNameToLabel(cn, label, 64)) {
-                            bool dup = false;
-                            for (int i = 0; i < count; i++)
-                                if (wcscmp(labels[i], label) == 0) { dup = true; break; }
-                            if (!dup) wcsncpy_s(labels[count++], 64, label, _TRUNCATE);
-                        }
+                        if (wcsstr(cn, L"2023")) has2023 = true;
+                        else if (wcsstr(cn, L"2011")) has2011 = true;
+                        else if (!other[0] && cn[0])
+                            wcsncpy_s(other, 64, cn, _TRUNCATE);
                         CertFreeCertificateContext(cert);
                     }
                 }
@@ -616,6 +608,13 @@ static int CollectBootCerts(wchar_t labels[][64], int cap)
         }
     }
     free(buf);
+
+    if (has2023) wcscpy_s(out, (size_t)cap, L"Pca 2023");
+    else if (has2011) wcscpy_s(out, (size_t)cap, L"Pca 2011");
+    else if (other[0]) wcsncpy_s(out, (size_t)cap, other, _TRUNCATE);
+    else return false;
+    return true;
+}
     return count;
 }
 
@@ -884,17 +883,10 @@ static void BuildModel(void)
     }
 
     if (fw == 2 && sb == 1) {
-        wchar_t certs[2][64];
-        memset(certs, 0, sizeof(certs));
-        int n = CollectBootCerts(certs, 2);
-        if (n > 0) {
-            wchar_t joined[160] = { 0 };
-            for (int i = 0; i < n; i++) {
-                if (i) wcscat_s(joined, 160, L", ");
-                wcscat_s(joined, 160, certs[i]);
-            }
-            wchar_t d[200];
-            WPrintf(d, 200, L"证书: %s", joined);
+        wchar_t cert[64] = { 0 };
+        if (CollectBootCert(cert, 64)) {
+            wchar_t d[128];
+            WPrintf(d, 128, L"证书: %s", cert);
             ModelAddDetail(r, d);
         }
     }
