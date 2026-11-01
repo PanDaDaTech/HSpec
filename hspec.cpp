@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <wchar.h>
+#include <wctype.h>
 #include <string.h>
 #include <stdlib.h>
 #include "resource.h"
@@ -74,6 +75,102 @@ static void ToWide(const char* s, wchar_t* dst, int cap)
     if (n <= 0) n = MultiByteToWideChar(CP_ACP, 0, s, -1, dst, cap);
     if (n <= 0) dst[0] = 0;
     else dst[cap - 1] = 0;
+}
+
+struct BrandAlias { const wchar_t* en; const wchar_t* zh; };
+
+// Longest phrases first so "Micron Technology" wins over "Micron".
+static const BrandAlias kBrandAliases[] = {
+    { L"Micron Technology", L"美光" },
+    { L"Western Digital", L"西部数据" },
+    { L"ASUSTeK COMPUTER INC.", L"华硕" },
+    { L"Micro-Star International Co., Ltd.", L"微星" },
+    { L"Gigabyte Technology", L"技嘉" },
+    { L"Hewlett-Packard", L"惠普" },
+    { L"Intel Corporation", L"英特尔" },
+    { L"SK hynix", L"海力士" },
+    { L"SK Hynix", L"海力士" },
+    { L"SKHynix", L"海力士" },
+    { L"Hynix", L"海力士" },
+    { L"Micron", L"美光" },
+    { L"Samsung", L"三星" },
+    { L"Kingston", L"金士顿" },
+    { L"Crucial", L"英睿达" },
+    { L"ADATA", L"威刚" },
+    { L"Corsair", L"海盗船" },
+    { L"G.Skill", L"芝奇" },
+    { L"Team Group", L"十铨" },
+    { L"SanDisk", L"闪迪" },
+    { L"WDC", L"西部数据" },
+    { L"Seagate", L"希捷" },
+    { L"Toshiba", L"东芝" },
+    { L"Kioxia", L"铠侠" },
+    { L"ASUSTeK", L"华硕" },
+    { L"ASUS", L"华硕" },
+    { L"Micro-Star", L"微星" },
+    { L"MSI", L"微星" },
+    { L"Gigabyte", L"技嘉" },
+    { L"ASRock", L"华擎" },
+    { L"Lenovo", L"联想" },
+    { L"Dell Inc.", L"戴尔" },
+    { L"Dell", L"戴尔" },
+    { L"HP", L"惠普" },
+    { L"Acer", L"宏碁" },
+    { L"Huawei", L"华为" },
+    { L"Xiaomi", L"小米" },
+    { L"Intel", L"英特尔" },
+    { L"NVIDIA", L"英伟达" },
+};
+
+static wchar_t* FindNoCase(wchar_t* s, const wchar_t* find)
+{
+    size_t n = wcslen(find);
+    if (n == 0) return s;
+    for (; *s; s++) {
+        size_t i = 0;
+        while (i < n && s[i] &&
+               towlower((wint_t)s[i]) == towlower((wint_t)find[i]))
+            i++;
+        if (i == n) return s;
+    }
+    return NULL;
+}
+
+static void ReplaceAllNoCase(wchar_t* s, int cap, const wchar_t* find,
+    const wchar_t* repl)
+{
+    size_t fl = wcslen(find), rl = wcslen(repl);
+    if (fl == 0) return;
+    wchar_t* p = s;
+    while ((p = FindNoCase(p, find)) != NULL) {
+        size_t tail = wcslen(p + fl);
+        size_t pos = (size_t)(p - s);
+        if (pos + rl + tail + 1 > (size_t)cap) return;
+        memmove(p + rl, p + fl, (tail + 1) * sizeof(wchar_t));
+        memcpy(p, repl, rl * sizeof(wchar_t));
+        p += rl;
+    }
+}
+
+static void TranslateVendorText(wchar_t* s, int cap)
+{
+    for (size_t i = 0; i < sizeof(kBrandAliases) / sizeof(kBrandAliases[0]); i++)
+        ReplaceAllNoCase(s, cap, kBrandAliases[i].en, kBrandAliases[i].zh);
+}
+
+static void TranslateCpuBrand(wchar_t* s, int cap)
+{
+    ReplaceAllNoCase(s, cap, L"Intel(R) Core(TM)", L"英特尔 酷睿");
+    ReplaceAllNoCase(s, cap, L"Intel Core(TM)", L"英特尔 酷睿");
+    ReplaceAllNoCase(s, cap, L"Intel Core", L"英特尔 酷睿");
+    ReplaceAllNoCase(s, cap, L"AMD Ryzen", L"AMD 锐龙");
+    ReplaceAllNoCase(s, cap, L"with Intel(R) Iris(R) Xe Graphics", L"含 Intel Iris Xe 显卡");
+    ReplaceAllNoCase(s, cap, L"with Intel(R) UHD Graphics", L"含 Intel UHD 显卡");
+    ReplaceAllNoCase(s, cap, L"with Intel(R) Graphics", L"含 Intel 显卡");
+    ReplaceAllNoCase(s, cap, L"with Intel Graphics", L"含 Intel 显卡");
+    ReplaceAllNoCase(s, cap, L"with Radeon Graphics", L"含 Radeon 显卡");
+    ReplaceAllNoCase(s, cap, L"Radeon Graphics", L"Radeon 显卡");
+    ReplaceAllNoCase(s, cap, L"Intel(R) UHD Graphics", L"Intel UHD 显卡");
 }
 
 static bool RegStrW(HKEY root, const wchar_t* sub, const wchar_t* name, wchar_t* out, DWORD outChars)
@@ -550,23 +647,46 @@ struct DiskInfo
     unsigned long long bytes;
 };
 
-// Localize a few well-known disk vendors in the model string.
+struct DiskVendor { const wchar_t* en; const wchar_t* zh; };
+
+static const DiskVendor kDiskVendors[] = {
+    { L"SK hynix", L"海力士" },
+    { L"SK Hynix", L"海力士" },
+    { L"SK_Hynix", L"海力士" },
+    { L"SKHynix", L"海力士" },
+    { L"Hynix", L"海力士" },
+    { L"Samsung", L"三星" },
+    { L"Seagate", L"希捷" },
+    { L"Western Digital", L"西部数据" },
+    { L"WDC", L"西部数据" },
+    { L"Toshiba", L"东芝" },
+    { L"Kioxia", L"铠侠" },
+    { L"Kingston", L"金士顿" },
+    { L"Crucial", L"英睿达" },
+    { L"Micron", L"美光" },
+    { L"SanDisk", L"闪迪" },
+    { L"Intel", L"英特尔" },
+    { L"Lenovo", L"联想" },
+    { L"LITEON", L"建兴" },
+    { L"Plextor", L"浦科特" },
+    { L"Netac", L"朗科" },
+    { L"Teclast", L"台电" },
+};
+
+// Localize the leading vendor token of a disk model string.
 static void LocalizeDiskVendor(wchar_t* model)
 {
-    static const wchar_t* kHynix[] = {
-        L"SKHynix", L"SK hynix", L"SK Hynix", L"SK_Hynix", L"Hynix"
-    };
-    for (int i = 0; i < 5; i++) {
-        const wchar_t* key = kHynix[i];
+    for (size_t i = 0; i < sizeof(kDiskVendors) / sizeof(kDiskVendors[0]); i++) {
+        const wchar_t* key = kDiskVendors[i].en;
         size_t n = wcslen(key);
         if (_wcsnicmp(model, key, n) != 0) continue;
         const wchar_t* rest = model + n;
         while (*rest == L'_' || *rest == L' ' || *rest == L'-') rest++;
         wchar_t tmp[160];
         if (*rest)
-            WPrintf(tmp, 160, L"海力士 %s", rest);
+            WPrintf(tmp, 160, L"%s %s", kDiskVendors[i].zh, rest);
         else
-            wcscpy_s(tmp, 160, L"海力士");
+            wcscpy_s(tmp, 160, kDiskVendors[i].zh);
         wcsncpy_s(model, 160, tmp, _TRUNCATE);
         return;
     }
@@ -726,6 +846,7 @@ static void BuildModel(void)
     GetCpuBrand(cpuBrand, 192);
     if (!cpuBrand[0] && g_smbios.cpuVersion[0])
         wcsncpy_s(cpuBrand, 192, g_smbios.cpuVersion, _TRUNCATE);
+    TranslateCpuBrand(cpuBrand, 192);
     int cores = GetPhysicalCores();
     int threads = GetLogicalCpus();
 
@@ -748,8 +869,11 @@ static void BuildModel(void)
     r = ModelAddRow(ICON_BOARD, boardTitle);
 
     if (g_smbios.boardManufacturer[0]) {
+        wchar_t mfr[128];
+        wcsncpy_s(mfr, 128, g_smbios.boardManufacturer, _TRUNCATE);
+        TranslateVendorText(mfr, 128);
         wchar_t d[256];
-        WPrintf(d, 256, L"厂商: %s", g_smbios.boardManufacturer);
+        WPrintf(d, 256, L"厂商: %s", mfr);
         ModelAddDetail(r, d);
     }
     if (g_smbios.biosVersion[0]) {
@@ -828,16 +952,20 @@ static void BuildModel(void)
     r = ModelAddRow(ICON_RAM, memTitle);
 
     if (g_smbios.memCount > 0) {
-        const wchar_t* mfr = g_smbios.mem[0].manufacturer;
-        if (mfr[0]) {
+        wchar_t m0[128] = { 0 };
+        wcsncpy_s(m0, 128, g_smbios.mem[0].manufacturer, _TRUNCATE);
+        TranslateVendorText(m0, 128);
+        if (m0[0]) {
             wchar_t d[256];
-            if (g_smbios.memCount > 1 && g_smbios.mem[1].manufacturer[0] &&
-                wcscmp(g_smbios.mem[1].manufacturer, mfr) != 0) {
-                WPrintf(d, 256, L"品牌: %s / %s", mfr,
-                    g_smbios.mem[1].manufacturer);
-            } else {
-                WPrintf(d, 256, L"品牌: %s", mfr);
+            wchar_t m1[128] = { 0 };
+            if (g_smbios.memCount > 1 && g_smbios.mem[1].manufacturer[0]) {
+                wcsncpy_s(m1, 128, g_smbios.mem[1].manufacturer, _TRUNCATE);
+                TranslateVendorText(m1, 128);
             }
+            if (m1[0] && wcscmp(m1, m0) != 0)
+                WPrintf(d, 256, L"品牌: %s / %s", m0, m1);
+            else
+                WPrintf(d, 256, L"品牌: %s", m0);
             ModelAddDetail(r, d);
         }
     }
