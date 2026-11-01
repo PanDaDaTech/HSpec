@@ -561,56 +561,78 @@ static bool CollectBootCert(wchar_t* out, int cap)
 {
     if (!out || cap <= 0) return false;
     out[0] = 0;
-    if (!EnablePrivilege(L"SeSystemEnvironmentPrivilege")) return false;
-
-    const DWORD kBufSize = 128 * 1024;
-    BYTE* buf = (BYTE*)malloc(kBufSize);
-    if (!buf) return false;
 
     bool has2011 = false, has2023 = false;
     wchar_t other[64] = { 0 };
 
-    SetLastError(ERROR_SUCCESS);
-    DWORD n = GetFirmwareEnvironmentVariableW(L"db",
-        L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}", buf, kBufSize);
-    if (n > 0 && n <= kBufSize) {
-        DWORD off = 0;
-        while (off + 28 <= n) {
-            const BYTE* list = buf + off;
-            UINT32 listSize = *(UINT32*)(list + 16);
-            UINT32 hdrSize = *(UINT32*)(list + 20);
-            UINT32 sigSize = *(UINT32*)(list + 24);
-            if (listSize < 28 || off + listSize > n || sigSize == 0) break;
+    if (EnablePrivilege(L"SeSystemEnvironmentPrivilege")) {
+        const DWORD kBufSize = 128 * 1024;
+        BYTE* buf = (BYTE*)malloc(kBufSize);
+        if (buf) {
+            SetLastError(ERROR_SUCCESS);
+            DWORD n = GetFirmwareEnvironmentVariableW(L"db",
+                L"{8be4df61-93ca-11d2-aa0d-00e098032b8c}", buf, kBufSize);
+            if (n > 0 && n <= kBufSize) {
+                DWORD off = 0;
+                while (off + 28 <= n) {
+                    const BYTE* list = buf + off;
+                    UINT32 listSize = *(UINT32*)(list + 16);
+                    UINT32 hdrSize = *(UINT32*)(list + 20);
+                    UINT32 sigSize = *(UINT32*)(list + 24);
+                    if (listSize < 28 || off + listSize > n || sigSize == 0) break;
 
-            GUID type;
-            memcpy(&type, list, sizeof(GUID));
-            DWORD p = off + 28 + hdrSize;
-            DWORD listEnd = off + listSize;
+                    GUID type;
+                    memcpy(&type, list, sizeof(GUID));
+                    DWORD p = off + 28 + hdrSize;
+                    DWORD listEnd = off + listSize;
 
-            while (p + sigSize <= listEnd) {
-                if (IsEqualGUID(type, kEfiCertX509)) {
-                    PCCERT_CONTEXT cert = CertCreateCertificateContext(
-                        X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, buf + p, sigSize);
-                    if (cert) {
-                        wchar_t cn[256] = { 0 };
-                        CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, NULL,
-                            cn, 256);
-                        if (wcsstr(cn, L"2023")) has2023 = true;
-                        else if (wcsstr(cn, L"2011")) has2011 = true;
-                        else if (!other[0] && cn[0])
-                            wcsncpy_s(other, 64, cn, _TRUNCATE);
-                        CertFreeCertificateContext(cert);
+                    while (p + sigSize <= listEnd) {
+                        if (IsEqualGUID(type, kEfiCertX509)) {
+                            PCCERT_CONTEXT cert = CertCreateCertificateContext(
+                                X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, buf + p, sigSize);
+                            if (cert) {
+                                wchar_t cn[256] = { 0 };
+                                CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                                    0, NULL, cn, 256);
+                                if (wcsstr(cn, L"2023")) has2023 = true;
+                                else if (wcsstr(cn, L"2011")) has2011 = true;
+                                else if (!other[0] && cn[0])
+                                    wcsncpy_s(other, 64, cn, _TRUNCATE);
+                                CertFreeCertificateContext(cert);
+                            }
+                        }
+                        p += sigSize;
                     }
+                    off += listSize;
                 }
-                p += sigSize;
             }
-            off += listSize;
+            free(buf);
         }
     }
-    free(buf);
 
-    if (has2023) wcscpy_s(out, (size_t)cap, L"Pca 2023");
-    else if (has2011) wcscpy_s(out, (size_t)cap, L"Pca 2011");
+    if (!has2011 && !has2023) {
+        // Firmware variables unavailable: use the Windows CA servicing state.
+        wchar_t status[64] = { 0 };
+        if (RegStrW(HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\Servicing",
+                L"UEFICA2023Status", status, 64)) {
+            if (_wcsicmp(status, L"Updated") == 0 ||
+                _wcsicmp(status, L"Installed") == 0 ||
+                _wcsicmp(status, L"Applied") == 0 ||
+                _wcsicmp(status, L"Success") == 0)
+                has2023 = true;
+        }
+        DWORD enabled = 0;
+        if (!has2023 &&
+            RegDwordW(HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Control\\SecureBoot\\State",
+                L"UEFISecureBootEnabled", &enabled) && enabled)
+            has2011 = true;
+    }
+
+    if (has2011 && has2023) wcscpy_s(out, (size_t)cap, L"PCA 2011/CA 2023");
+    else if (has2011) wcscpy_s(out, (size_t)cap, L"PCA 2011");
+    else if (has2023) wcscpy_s(out, (size_t)cap, L"CA 2023");
     else if (other[0]) wcsncpy_s(out, (size_t)cap, other, _TRUNCATE);
     else return false;
     return true;
@@ -999,6 +1021,7 @@ static ULONGLONG g_wallpaperStamp = 0;
 static NOTIFYICONDATAW g_nid;
 static bool g_trayAdded = false;
 static UINT g_taskbarCreatedMsg = 0;
+static wchar_t g_dumpPath[MAX_PATH] = { 0 };
 
 static const Gdiplus::Color kTitleColorDark(255, 26, 26, 26);
 static const Gdiplus::Color kDetailColorDark(255, 58, 58, 58);
@@ -1406,8 +1429,13 @@ static int GetEncoderClsid(const wchar_t* mime, CLSID* clsid)
 static void DumpPanelIfRequested(const void* bits)
 {
     wchar_t path[MAX_PATH] = { 0 };
-    DWORD n = GetEnvironmentVariableW(L"HSPEC_DUMP", path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH || !bits) return;
+    if (g_dumpPath[0]) {
+        wcsncpy_s(path, MAX_PATH, g_dumpPath, _TRUNCATE);
+    } else {
+        DWORD n = GetEnvironmentVariableW(L"HSPEC_DUMP", path, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) return;
+    }
+    if (!bits) return;
     CLSID png;
     if (GetEncoderClsid(L"image/png", &png) < 0) return;
     Gdiplus::Bitmap out(g_winW, g_winH, g_winW * 4, PixelFormat32bppPARGB,
@@ -1795,6 +1823,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(mutex);
         return 0;
+    }
+
+    {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (argv) {
+            for (int i = 1; i + 1 < argc; i++) {
+                if (wcscmp(argv[i], L"--dump") == 0) {
+                    wcsncpy_s(g_dumpPath, MAX_PATH, argv[i + 1], _TRUNCATE);
+                    i++;
+                }
+            }
+            LocalFree(argv);
+        }
     }
 
     Gdiplus::GdiplusStartupInput gdiIn;

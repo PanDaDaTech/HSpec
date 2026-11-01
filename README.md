@@ -2,6 +2,8 @@
 
 轻量、零依赖的桌面硬件信息面板。纯 Win32 C++，直接画在桌面层上：**不置顶、背景透明、不吃焦点**。
 
+![HSpec 预览](docs/preview.png)
+
 ```
 ┌ 桌面（壁纸层）
 │                                        [图标] Intel(R) Core(TM) i9-10850K CPU @ 3.60GHz
@@ -48,7 +50,7 @@
 | 容量 | 物理磁盘 | `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`（免管理员） |
 | 分区格式 | 物理磁盘 | `IOCTL_DISK_GET_DRIVE_LAYOUT_EX` → MBR / GPT / RAW |
 
-> 证书一项需要管理员权限（`SeSystemEnvironmentPrivilege` 才能读 UEFI `db`）。程序以 `asInvoker` 启动：普通权限下仍然显示“启动: UEFI (Secure Boot)”，只是省略证书行；在 WinPE / SYSTEM 下会完整显示。硬盘信息使用 `FILE_ANY_ACCESS` 的 geometry / property / layout IOCTL，**不需要管理员**。
+> 程序以 `requireAdministrator` 启动（读取 UEFI `db` 证书需要管理员权限）。证书行紧跟在“启动”后面：2023 与 2011 都存在时显示 `PCA 2011/CA 2023`，否则显示实际存在的那个；固件变量不可读时用 Windows 的 CA servicing 状态兜底。
 >
 > 内存条型号来自 SMBIOS Type 17。若系统禁用了固件表接口（部分虚拟机/精简系统），会自动降级为只显示已安装总量。
 
