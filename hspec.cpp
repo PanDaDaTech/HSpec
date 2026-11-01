@@ -615,8 +615,6 @@ static bool CollectBootCert(wchar_t* out, int cap)
     else return false;
     return true;
 }
-    return count;
-}
 
 // ===========================================================================
 // Disks
