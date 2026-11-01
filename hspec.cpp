@@ -119,7 +119,6 @@ static const BrandAlias kBrandAliases[] = {
     { L"Huawei", L"华为" },
     { L"Xiaomi", L"小米" },
     { L"Intel", L"英特尔" },
-    { L"NVIDIA", L"英伟达" },
 };
 
 static wchar_t* FindNoCase(wchar_t* s, const wchar_t* find)
@@ -156,21 +155,6 @@ static void TranslateVendorText(wchar_t* s, int cap)
 {
     for (size_t i = 0; i < sizeof(kBrandAliases) / sizeof(kBrandAliases[0]); i++)
         ReplaceAllNoCase(s, cap, kBrandAliases[i].en, kBrandAliases[i].zh);
-}
-
-static void TranslateCpuBrand(wchar_t* s, int cap)
-{
-    ReplaceAllNoCase(s, cap, L"Intel(R) Core(TM)", L"英特尔 酷睿");
-    ReplaceAllNoCase(s, cap, L"Intel Core(TM)", L"英特尔 酷睿");
-    ReplaceAllNoCase(s, cap, L"Intel Core", L"英特尔 酷睿");
-    ReplaceAllNoCase(s, cap, L"AMD Ryzen", L"AMD 锐龙");
-    ReplaceAllNoCase(s, cap, L"with Intel(R) Iris(R) Xe Graphics", L"含 Intel Iris Xe 显卡");
-    ReplaceAllNoCase(s, cap, L"with Intel(R) UHD Graphics", L"含 Intel UHD 显卡");
-    ReplaceAllNoCase(s, cap, L"with Intel(R) Graphics", L"含 Intel 显卡");
-    ReplaceAllNoCase(s, cap, L"with Intel Graphics", L"含 Intel 显卡");
-    ReplaceAllNoCase(s, cap, L"with Radeon Graphics", L"含 Radeon 显卡");
-    ReplaceAllNoCase(s, cap, L"Radeon Graphics", L"Radeon 显卡");
-    ReplaceAllNoCase(s, cap, L"Intel(R) UHD Graphics", L"Intel UHD 显卡");
 }
 
 static bool RegStrW(HKEY root, const wchar_t* sub, const wchar_t* name, wchar_t* out, DWORD outChars)
@@ -846,7 +830,6 @@ static void BuildModel(void)
     GetCpuBrand(cpuBrand, 192);
     if (!cpuBrand[0] && g_smbios.cpuVersion[0])
         wcsncpy_s(cpuBrand, 192, g_smbios.cpuVersion, _TRUNCATE);
-    TranslateCpuBrand(cpuBrand, 192);
     int cores = GetPhysicalCores();
     int threads = GetLogicalCpus();
 
