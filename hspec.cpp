@@ -414,6 +414,9 @@ static const wchar_t* MemTypeName(int type)
     case 0x13: return L"DDR2";
     case 0x18: return L"DDR3";
     case 0x1A: return L"DDR4";
+    case 0x1B: return L"LPDDR";
+    case 0x1C: return L"LPDDR2";
+    case 0x1D: return L"LPDDR3";
     case 0x1E: return L"LPDDR4";
     case 0x1F: return L"NVDIMM";
     case 0x20: return L"HBM";
@@ -939,8 +942,13 @@ static void BuildModel(void)
         firstSpeed = g_smbios.mem[0].speed;
     }
     double totalGb = (double)totalBytes / 1073741824.0;
-    if (memType[0])
+    int memCount = g_smbios.memCount;
+    if (memType[0] && memCount > 1)
+        WPrintf(memTitle, 256, L"内存: %.0f GB %s ×%d", totalGb, memType, memCount);
+    else if (memType[0])
         WPrintf(memTitle, 256, L"内存: %.0f GB %s", totalGb, memType);
+    else if (memCount > 1)
+        WPrintf(memTitle, 256, L"内存: %.0f GB ×%d", totalGb, memCount);
     else
         WPrintf(memTitle, 256, L"内存: %.0f GB", totalGb);
 
@@ -974,12 +982,24 @@ static void BuildModel(void)
             wcsncat_s(memDetail, 256, g_smbios.mem[1].part, _TRUNCATE);
         }
         if (firstSpeed > 0) {
-            wchar_t d[320];
-            WPrintf(d, 320, L"型号: %s    %d MHz", memDetail, firstSpeed);
+            wchar_t modSize[32] = { 0 };
+            if (g_smbios.memCount > 0)
+                FormatCapacity(g_smbios.mem[0].bytes, modSize, 32);
+            wchar_t d[384];
+            if (modSize[0])
+                WPrintf(d, 384, L"型号: %s    %s    %d MHz", memDetail, modSize, firstSpeed);
+            else
+                WPrintf(d, 384, L"型号: %s    %d MHz", memDetail, firstSpeed);
             ModelAddDetail(r, d);
         } else {
-            wchar_t d[320];
-            WPrintf(d, 320, L"型号: %s", memDetail);
+            wchar_t modSize[32] = { 0 };
+            if (g_smbios.memCount > 0)
+                FormatCapacity(g_smbios.mem[0].bytes, modSize, 32);
+            wchar_t d[384];
+            if (modSize[0])
+                WPrintf(d, 384, L"型号: %s    %s", memDetail, modSize);
+            else
+                WPrintf(d, 384, L"型号: %s", memDetail);
             ModelAddDetail(r, d);
         }
     }

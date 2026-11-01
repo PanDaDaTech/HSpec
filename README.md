@@ -12,9 +12,9 @@
 │                                               厂商: ASUSTeK COMPUTER INC.
 │                                               固件: 2801
 │                                               启动: UEFI (Secure Boot)
-│                                               证书: Pca 2011
-│                                        [图标] 内存: 32 GB DDR4
-│                                               型号: CMK32GX4M2B3200C16    3200 MHz
+│                                               证书: PCA 2011
+│                                        [图标] 内存: 32 GB DDR4 ×2
+│                                               型号: CMK32GX4M2B3200C16    16 GB    3200 MHz
 │                                        [图标] 硬盘: Samsung SSD 970 EVO Plus 1TB
 │                                               容量: 932 GB    格式: GPT    类型: NVME
 └ 图标区
