@@ -107,6 +107,35 @@ static bool RegDwordW(HKEY root, const wchar_t* sub, const wchar_t* name, DWORD*
     return true;
 }
 
+static bool RegBinaryW(HKEY root, const wchar_t* sub, const wchar_t* name,
+    BYTE** out, DWORD* outSize)
+{
+    *out = NULL;
+    *outSize = 0;
+    HKEY key = NULL;
+    if (RegOpenKeyExW(root, sub, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+    DWORD type = 0, bytes = 0;
+    LONG rc = RegQueryValueExW(key, name, NULL, &type, NULL, &bytes);
+    if (rc != ERROR_SUCCESS || type != REG_BINARY || bytes < 8) {
+        RegCloseKey(key);
+        return false;
+    }
+    BYTE* buf = (BYTE*)malloc(bytes);
+    if (!buf) {
+        RegCloseKey(key);
+        return false;
+    }
+    rc = RegQueryValueExW(key, name, NULL, &type, buf, &bytes);
+    RegCloseKey(key);
+    if (rc != ERROR_SUCCESS) {
+        free(buf);
+        return false;
+    }
+    *out = buf;
+    *outSize = bytes;
+    return true;
+}
+
 static void FormatCapacity(unsigned long long bytes, wchar_t* out, int cap)
 {
     double gb = (double)bytes / 1073741824.0;
@@ -158,7 +187,10 @@ static void SmbiosGetStr(const BYTE* strtab, const BYTE* strend, BYTE index, wch
         if (p >= (const char*)strend) return;
         p++;
     }
-    if (p < (const char*)strend) ToWide(p, out, cap);
+    if (p < (const char*)strend) {
+        ToWide(p, out, cap);
+        TrimW(out);
+    }
 }
 
 static void SmbiosRegFallback(SmbiosInfo* si)
@@ -175,21 +207,13 @@ static void SmbiosRegFallback(SmbiosInfo* si)
     if (!si->boardVersion[0]) RegStrW(HKEY_LOCAL_MACHINE, k, L"BaseBoardVersion", si->boardVersion, 96);
 }
 
-static bool ParseSmbios(SmbiosInfo* si)
+static bool SmbiosTableLooksValid(const BYTE* p, const BYTE* end)
 {
-    memset(si, 0, sizeof(*si));
-    DWORD size = GetSystemFirmwareTable('RSMB', 0, NULL, 0);
-    if (size < 8) return false;
-    BYTE* buf = (BYTE*)malloc(size);
-    if (!buf) return false;
-    DWORD got = GetSystemFirmwareTable('RSMB', 0, buf, size);
-    if (got < 8) { free(buf); return false; }
+    return p + 4 <= end && p[0] <= 127 && p[1] >= 4;
+}
 
-    DWORD tableLen = *(DWORD*)(buf + 4);
-    const BYTE* table = buf + 8;
-    const BYTE* end = table + tableLen;
-    if (end > buf + got) end = buf + got;
-
+static void ParseSmbiosTable(const BYTE* table, const BYTE* end, SmbiosInfo* si)
+{
     const BYTE* p = table;
     while (p + 4 <= end) {
         BYTE type = p[0];
@@ -222,7 +246,7 @@ static bool ParseSmbios(SmbiosInfo* si)
             SmbiosGetStr(strtab, strend, p[0x10], si->cpuVersion, 192);
             si->cpuMaxMhz = (int)*(WORD*)(p + 0x14);
         } else if (type == 17 && len >= 0x17 && si->memCount < 16) {
-            DWORD memBytes = 0;
+            unsigned long long memBytes = 0;
             WORD sizeMb = *(WORD*)(p + 0x0C);
             if (sizeMb == 0x7FFF && len >= 0x20) {
                 DWORD extMb = *(DWORD*)(p + 0x1C) & 0x7FFFFFFF;
@@ -236,8 +260,9 @@ static bool ParseSmbios(SmbiosInfo* si)
                 m.bytes = memBytes;
                 m.type = (len > 0x12) ? p[0x12] : 0;
                 m.speed = (int)*(WORD*)(p + 0x15);
-                if (len >= 0x2A) {
-                    DWORD extSpeed = *(DWORD*)(p + 0x28);
+                if (m.speed == 0xFFFF && len >= 0x58) {
+                    // SMBIOS 3.2 extended speed lives at 0x54.
+                    DWORD extSpeed = *(DWORD*)(p + 0x54);
                     if (extSpeed > 0 && extSpeed != 0xFFFFFFFF) m.speed = (int)extSpeed;
                 }
                 if (len > 0x17) SmbiosGetStr(strtab, strend, p[0x17], m.manufacturer, 64);
@@ -248,9 +273,55 @@ static bool ParseSmbios(SmbiosInfo* si)
 
         p = (q + 1 < end) ? q + 2 : end;
     }
-    free(buf);
+}
+
+static bool ParseSmbios(SmbiosInfo* si)
+{
+    memset(si, 0, sizeof(*si));
+    bool parsed = false;
+
+    DWORD size = GetSystemFirmwareTable('RSMB', 0, NULL, 0);
+    if (size >= 8) {
+        BYTE* buf = (BYTE*)malloc(size);
+        if (buf) {
+            DWORD got = GetSystemFirmwareTable('RSMB', 0, buf, size);
+            if (got >= 8) {
+                DWORD len = *(DWORD*)(buf + 4);
+                const BYTE* table = buf + 8;
+                const BYTE* end = table + len;
+                if (end > buf + got) end = buf + got;
+                if (SmbiosTableLooksValid(table, end)) {
+                    ParseSmbiosTable(table, end, si);
+                    parsed = true;
+                }
+            }
+            free(buf);
+        }
+    }
+
+    if (!parsed) {
+        // Some systems reject the firmware-table API; mssmbios keeps the same
+        // RawSMBIOSData blob in the registry.
+        BYTE* reg = NULL;
+        DWORD regSize = 0;
+        if (RegBinaryW(HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Services\\mssmbios\\Data",
+                L"SMBiosData", &reg, &regSize)) {
+            DWORD len = (regSize >= 8) ? *(DWORD*)(reg + 4) : 0;
+            if (len > 0 && 8 + len <= regSize &&
+                SmbiosTableLooksValid(reg + 8, reg + 8 + len)) {
+                ParseSmbiosTable(reg + 8, reg + 8 + len, si);
+                parsed = true;
+            } else if (SmbiosTableLooksValid(reg, reg + regSize)) {
+                ParseSmbiosTable(reg, reg + regSize, si);
+                parsed = true;
+            }
+            free(reg);
+        }
+    }
+
     SmbiosRegFallback(si);
-    return true;
+    return parsed;
 }
 
 static const wchar_t* MemTypeName(int type)
@@ -1015,48 +1086,56 @@ static void AddRoundRect(Gdiplus::GraphicsPath& path, const Gdiplus::RectF& rc, 
 static void DrawGlyph(Gdiplus::Graphics& g, Gdiplus::Pen& pen, int kind,
     float x, float y, float sz, float s)
 {
+    const float u = sz / 24.0f;
     switch (kind) {
     case ICON_CPU: {
-        Gdiplus::RectF screen(x + 1.0f * s, y + 2.0f * s, sz - 2.0f * s, sz * 0.60f);
+        // Chip with pins on all four sides, 14x14 body inside the 24 box.
         Gdiplus::GraphicsPath p;
-        AddRoundRect(p, screen, 2.0f * s);
+        AddRoundRect(p, Gdiplus::RectF(x + 5 * u, y + 5 * u, 14 * u, 14 * u), 2 * u);
         g.DrawPath(&pen, &p);
-        g.DrawLine(&pen, x + sz * 0.50f, y + sz * 0.62f, x + sz * 0.50f, y + sz * 0.80f);
-        g.DrawLine(&pen, x + sz * 0.30f, y + sz * 0.82f, x + sz * 0.70f, y + sz * 0.82f);
-        break;
-    }
-    case ICON_BOARD: {
-        Gdiplus::RectF outer(x + 2.0f * s, y + 2.0f * s, sz - 4.0f * s, sz - 4.0f * s);
-        Gdiplus::GraphicsPath p;
-        AddRoundRect(p, outer, 2.0f * s);
-        g.DrawPath(&pen, &p);
-        Gdiplus::RectF inner(x + 7.0f * s, y + 8.0f * s, sz - 14.0f * s, sz - 13.0f * s);
-        g.DrawRectangle(&pen, inner);
+        g.DrawRectangle(&pen, x + 9.5f * u, y + 9.5f * u, 5 * u, 5 * u);
         for (int i = 0; i < 3; i++) {
-            float t = x + (7.0f + i * 5.0f) * s;
-            g.DrawLine(&pen, t, y + 2.0f * s, t, y + 5.0f * s);
-            g.DrawLine(&pen, t, y + sz - 5.0f * s, t, y + sz - 2.0f * s);
+            float t = x + (8.0f + i * 4.0f) * u;
+            g.DrawLine(&pen, t, y + 2 * u, t, y + 5 * u);
+            g.DrawLine(&pen, t, y + 19 * u, t, y + 22 * u);
+            float v = y + (8.0f + i * 4.0f) * u;
+            g.DrawLine(&pen, x + 2 * u, v, x + 5 * u, v);
+            g.DrawLine(&pen, x + 19 * u, v, x + 22 * u, v);
         }
         break;
     }
+    case ICON_BOARD: {
+        // Motherboard: wide board, CPU socket, two slots, front-panel header.
+        Gdiplus::GraphicsPath p;
+        AddRoundRect(p, Gdiplus::RectF(x + 2.5f * u, y + 4 * u, 19 * u, 16 * u), 2 * u);
+        g.DrawPath(&pen, &p);
+        g.DrawRectangle(&pen, x + 6 * u, y + 8 * u, 6 * u, 5 * u);
+        g.DrawLine(&pen, x + 15 * u, y + 8 * u, x + 15 * u, y + 16 * u);
+        g.DrawLine(&pen, x + 18 * u, y + 8 * u, x + 18 * u, y + 16 * u);
+        g.DrawLine(&pen, x + 6 * u, y + 16.5f * u, x + 12 * u, y + 16.5f * u);
+        break;
+    }
     case ICON_RAM: {
-        Gdiplus::RectF body(x + 0.5f * s, y + 6.0f * s, sz - 1.0f * s, sz * 0.44f);
-        g.DrawRectangle(&pen, body);
-        g.DrawLine(&pen, x + sz * 0.34f, y + 9.0f * s, x + sz * 0.34f, y + sz * 0.50f);
-        g.DrawLine(&pen, x + sz * 0.66f, y + 9.0f * s, x + sz * 0.66f, y + sz * 0.50f);
-        for (int i = 0; i < 4; i++) {
-            float t = x + (2.0f + i * 5.5f) * s;
-            g.DrawLine(&pen, t, y + sz * 0.50f, t, y + sz * 0.57f);
+        // RAM stick: wide body with notches and contact pins.
+        Gdiplus::GraphicsPath p;
+        AddRoundRect(p, Gdiplus::RectF(x + 2 * u, y + 7 * u, 20 * u, 10 * u), 1.5f * u);
+        g.DrawPath(&pen, &p);
+        g.DrawLine(&pen, x + 8.5f * u, y + 12 * u, x + 8.5f * u, y + 17 * u);
+        g.DrawLine(&pen, x + 14.5f * u, y + 12 * u, x + 14.5f * u, y + 17 * u);
+        for (int i = 0; i < 5; i++) {
+            float t = x + (4.0f + i * 4.0f) * u;
+            g.DrawLine(&pen, t, y + 17 * u, t, y + 19 * u);
         }
         break;
     }
     case ICON_DISK: {
-        Gdiplus::RectF body(x + 1.5f * s, y + 5.0f * s, sz - 3.0f * s, sz * 0.52f);
+        // Drive: rounded body, spindle and two slot lines.
         Gdiplus::GraphicsPath p;
-        AddRoundRect(p, body, 2.0f * s);
+        AddRoundRect(p, Gdiplus::RectF(x + 2 * u, y + 5 * u, 20 * u, 14 * u), 2 * u);
         g.DrawPath(&pen, &p);
-        g.DrawEllipse(&pen, x + 5.0f * s, y + 9.5f * s, 6.0f * s, 6.0f * s);
-        g.DrawLine(&pen, x + sz - 8.0f * s, y + 10.0f * s, x + sz - 8.0f * s, y + 16.0f * s);
+        g.DrawEllipse(&pen, x + 6 * u, y + 9 * u, 6 * u, 6 * u);
+        g.DrawLine(&pen, x + 15 * u, y + 9 * u, x + 19 * u, y + 9 * u);
+        g.DrawLine(&pen, x + 15 * u, y + 13 * u, x + 19 * u, y + 13 * u);
         break;
     }
     default: break;
@@ -1188,6 +1267,39 @@ static void DrawTextGdiLine(Gdiplus::Graphics& g, const wchar_t* text, int px,
     DeleteDC(dc);
 }
 
+static int GetEncoderClsid(const wchar_t* mime, CLSID* clsid)
+{
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    Gdiplus::ImageCodecInfo* codecs = (Gdiplus::ImageCodecInfo*)malloc(size);
+    if (!codecs) return -1;
+    Gdiplus::GetImageEncoders(num, size, codecs);
+    int found = -1;
+    for (UINT i = 0; i < num; i++) {
+        if (wcscmp(codecs[i].MimeType, mime) == 0) {
+            *clsid = codecs[i].Clsid;
+            found = (int)i;
+            break;
+        }
+    }
+    free(codecs);
+    return found;
+}
+
+static void DumpPanelIfRequested(const void* bits)
+{
+    wchar_t path[MAX_PATH] = { 0 };
+    DWORD n = GetEnvironmentVariableW(L"HSPEC_DUMP", path, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH || !bits) return;
+    CLSID png;
+    if (GetEncoderClsid(L"image/png", &png) < 0) return;
+    Gdiplus::Bitmap out(g_winW, g_winH, g_winW * 4, PixelFormat32bppPARGB,
+        (BYTE*)bits);
+    if (out.GetLastStatus() == Gdiplus::Ok)
+        out.Save(path, &png, NULL);
+}
+
 static bool RenderInternal(void)
 {
     if (!g_hwnd || g_winW <= 0 || g_winH <= 0) return false;
@@ -1217,7 +1329,8 @@ static bool RenderInternal(void)
 
     for (int i = 0; i < g_rowCount; i++) {
         UiRow& row = g_rows[i];
-        DrawGlyph(g, pen, row.icon, 1.0f * (float)s, y, (float)g_iconSize, (float)s);
+        float iconY = y + ((float)g_titleH - (float)g_iconSize) * 0.5f;
+        DrawGlyph(g, pen, row.icon, 2.0f * (float)s, iconY, (float)g_iconSize, (float)s);
         DrawTextGdiLine(g, row.title, titlePx, FW_BOLD, g_titleColor, g_lightText,
             (int)textX, (int)y, (int)textW, g_titleH);
         y += (float)g_titleH;
@@ -1262,6 +1375,8 @@ static bool RenderInternal(void)
     }
     bmp.UnlockBits(&bd);
     if (!hbm) return false;
+
+    DumpPanelIfRequested(bits);
 
     HDC screen = GetDC(NULL);
     HDC mem = CreateCompatibleDC(screen);

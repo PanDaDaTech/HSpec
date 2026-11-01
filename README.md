@@ -39,7 +39,7 @@
 | :--- | :--- | :--- |
 | CPU 名称 | 注册表 + CPUID 兜底 | `HKLM\HARDWARE\DESCRIPTION\System\CentralProcessor\0\ProcessorNameString`，`__cpuid(0x80000002..4)` |
 | 核心 / 线程 | 拓扑枚举 | `GetLogicalProcessorInformationEx(RelationProcessorCore)`、`GetActiveProcessorCount` |
-| 主板 / BIOS / 内存条 | SMBIOS 原始表，注册表兜底 | `GetSystemFirmwareTable('RSMB', 0, ...)`，解析 Type 0/1/2/4/17；`HKLM\HARDWARE\DESCRIPTION\System\BIOS` |
+| 主板 / BIOS / 内存条 | SMBIOS 原始表，注册表兜底 | `GetSystemFirmwareTable('RSMB')`；失败时读 `HKLM\SYSTEM\CurrentControlSet\Services\mssmbios\Data\SMBiosData`，再兜底 `HKLM\HARDWARE\DESCRIPTION\System\BIOS` |
 | 内存总量 | 系统 | `GetPhysicallyInstalledSystemMemory`（已安装），`GlobalMemoryStatusEx`（可用量兜底） |
 | 固件类型 | 内核 + 注册表兜底 | `GetFirmwareType()`（动态加载），`PEFirmwareType` |
 | 安全启动状态 | 注册表 / UEFI 变量 | `...\Control\SecureBoot\State\UEFISecureBootEnabled`，`GetFirmwareEnvironmentVariableW` |
