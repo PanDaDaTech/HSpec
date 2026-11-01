@@ -1,5 +1,6 @@
 // resource.h
 #define IDI_MAIN_ICON 101
+#define IDR_FONT 102
 
 #define VER_FILEVERSION     1,0,0,0
 #define VER_FILEVERSION_STR "1.0"

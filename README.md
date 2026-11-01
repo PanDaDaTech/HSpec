@@ -21,10 +21,13 @@
 ## 特性
 
 - **桌面层显示**：普通顶层分层窗口，z-order 锚定在 `Progman/WorkerW` 桌面栈之上、所有普通窗口之下；从不使用 `WS_EX_TOPMOST`，按 `Win+D` 后也会自动回到桌面。
-- **逐像素透明**：GDI+ 32bpp 位图 + `UpdateLayeredWindow`，文字抗锯齿，无白底、无边框。
-- **自动明暗**：读取壁纸并采样面板区域的亮度，深色壁纸自动切换为浅色文字，浅色壁纸用深色文字。
+- **逐像素透明**：GDI+ 32bpp 位图 + `UpdateLayeredWindow`，文字抗锯齿，无白底、无边框；面板本身点击穿透。
+- **自动明暗**：读取当前壁纸（`SPI_GETDESKWALLPAPER`）并采样面板区域的亮度，深色壁纸自动切换为浅色文字，浅色壁纸用深色文字；壁纸切换后 1 秒内自动更新。
+- **内嵌 MiSans**：MiSans Medium 子集（ASCII + 界面文案 + GB2312 一级常用字，约 840 KB），100% DPI 下使用 `AntiAliasGridFit`，避免小字号发糊。
+- **托盘图标**：右键或双击托盘图标打开菜单（刷新 / 退出）；面板本身不再响应鼠标。
+- **自动刷新**：设备增删（`WM_DEVICECHANGE`）、壁纸切换、分辨率/DPI 变化都会自动重建信息。
 - **零第三方依赖**：不使用 WMI、PowerShell、`msinfo32`、`wmic`，不释放任何临时文件。
-- **单文件源码**：`hspec.cpp` 一个翻译单元；资源只有图标、manifest 和版本信息。
+- **单文件源码**：`hspec.cpp` 一个翻译单元；资源为图标、字体子集、manifest 和版本信息。
 - **多架构**：x64 / x86 / arm64，GitHub Actions 全量编译。
 - **Win7+**：不依赖 XP；使用 `UpdateLayeredWindow` 实现逐像素透明。
 
@@ -51,9 +54,9 @@
 
 ## 使用
 
-1. 运行 `HSpec.exe`。
-2. 面板出现在主屏右侧。**右键**：刷新 / 退出。
-3. 信息每 60 秒自动刷新一次；切换分辨率或 DPI 会重新排布。
+1. 运行 `HSpec.exe`，面板出现在主屏右上角。
+2. 托盘区找到 HSpec 图标（可能收在 `^` 里）：右键或双击打开菜单，选择 **刷新 / 退出**。
+3. 信息每 60 秒自动刷新；插入/移除设备、切换壁纸、改变分辨率或 DPI 时会立即刷新。
 
 单实例运行（互斥量 `HSpec_Singleton`）。不写注册表、不开机自启、不联网。
 
@@ -66,6 +69,13 @@ build.cmd
 ```
 
 CI 每次 push 自动编译 x64 / x86 / arm64 并上传 artifact，见 `.github/workflows/build.yml`。
+
+字体子集已入库（`winres/MiSans-Medium.ttf`）。如需重建（新增界面文案后）：
+
+```cmd
+python tools/subset_font.py --full <完整 MiSans-Medium.ttf>
+python tools/subset_font.py --check
+```
 
 手动编译命令：
 

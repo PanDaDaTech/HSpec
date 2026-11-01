@@ -4,6 +4,8 @@
 
 IDI_MAIN_ICON ICON "winres/hspec.ico"
 
+IDR_FONT RCDATA "winres/MiSans-Medium.ttf"
+
 1 24 "hspec.manifest"
 
 VS_VERSION_INFO VERSIONINFO

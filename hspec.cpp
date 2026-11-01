@@ -12,6 +12,8 @@
 #include <objbase.h>
 #include <propidl.h>
 #include <gdiplus.h>
+#include <shellapi.h>
+#include <dbt.h>
 #include <intrin.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -23,6 +25,7 @@
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
@@ -781,6 +784,13 @@ static UINT g_dpi = 96;
 static int g_winW = 420;
 static int g_winH = 320;
 static wchar_t g_fontName[64] = L"Microsoft YaHei UI";
+static Gdiplus::PrivateFontCollection* g_gdipFonts = NULL;
+static bool g_fontReady = false;
+static HANDLE g_fontReg = NULL;
+static ULONGLONG g_wallpaperStamp = 0;
+static NOTIFYICONDATAW g_nid;
+static bool g_trayAdded = false;
+static UINT g_taskbarCreatedMsg = 0;
 
 static const Gdiplus::Color kTitleColorDark(255, 26, 26, 26);
 static const Gdiplus::Color kDetailColorDark(255, 58, 58, 58);
@@ -812,58 +822,138 @@ static void ApplyPalette(void)
     }
 }
 
+static bool GetWallpaperPath(wchar_t* out, int cap)
+{
+    out[0] = 0;
+    // SPI_GETDESKWALLPAPER is the image currently in use (also for slideshows).
+    if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, (UINT)cap, out, 0) && out[0]) {
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return true;
+    }
+    wchar_t appdata[MAX_PATH] = { 0 };
+    DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        WPrintf(out, (size_t)cap, L"%s\\Microsoft\\Windows\\Themes\\TranscodedWallpaper",
+            appdata);
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return true;
+    }
+    RegStrW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallPaper", out, (DWORD)cap);
+    return out[0] != 0;
+}
+
+static ULONGLONG HashStamp(const wchar_t* path, ULONGLONG h)
+{
+    if (!path || !path[0]) return h;
+    for (const wchar_t* c = path; *c; c++)
+        h = (h ^ (ULONGLONG)(unsigned)*c) * 1099511628211ULL;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return h;
+    h = (h ^ (ULONGLONG)fad.ftLastWriteTime.dwLowDateTime) * 1099511628211ULL;
+    h = (h ^ (ULONGLONG)fad.ftLastWriteTime.dwHighDateTime) * 1099511628211ULL;
+    h = (h ^ (ULONGLONG)fad.nFileSizeLow) * 1099511628211ULL;
+    h = (h ^ (ULONGLONG)fad.nFileSizeHigh) * 1099511628211ULL;
+    return h;
+}
+
+// Changes whenever the active wallpaper image or solid background color does.
+static ULONGLONG WallpaperStamp(void)
+{
+    ULONGLONG h = 1469598103934665603ULL;
+    wchar_t path[MAX_PATH] = { 0 };
+    if (GetWallpaperPath(path, MAX_PATH)) h = HashStamp(path, h);
+    wchar_t bg[64] = { 0 };
+    if (RegStrW(HKEY_CURRENT_USER, L"Control Panel\\Colors", L"Background", bg, 64)) {
+        for (const wchar_t* c = bg; *c; c++)
+            h = (h ^ (ULONGLONG)(unsigned)*c) * 1099511628211ULL;
+    }
+    return h;
+}
+
 // Pick dark or light text from the wallpaper brightness behind the panel.
 static void UpdateTheme(void)
 {
     wchar_t path[MAX_PATH] = { 0 };
-    RegStrW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallPaper", path, MAX_PATH);
-    if (!path[0]) {
-        wchar_t appdata[MAX_PATH] = { 0 };
-        DWORD n = GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH);
-        if (n > 0 && n < MAX_PATH)
-            WPrintf(path, MAX_PATH, L"%s\\Microsoft\\Windows\\Themes\\TranscodedWallpaper",
-                appdata);
-    }
-    if (!path[0]) return;
+    bool haveImage = false;
 
-    Gdiplus::Bitmap img(path);
-    if (img.GetLastStatus() != Gdiplus::Ok) return;
-    int iw = (int)img.GetWidth();
-    int ih = (int)img.GetHeight();
-    if (iw <= 0 || ih <= 0) return;
+    if (GetWallpaperPath(path, MAX_PATH)) {
+        Gdiplus::Bitmap img(path);
+        if (img.GetLastStatus() == Gdiplus::Ok) {
+            int iw = (int)img.GetWidth();
+            int ih = (int)img.GetHeight();
+            if (iw > 0 && ih > 0) {
+                POINT origin = { 0, 0 };
+                MONITORINFO mi;
+                memset(&mi, 0, sizeof(mi));
+                mi.cbSize = sizeof(mi);
+                GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi);
 
-    POINT origin = { 0, 0 };
-    MONITORINFO mi;
-    memset(&mi, 0, sizeof(mi));
-    mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi);
-
-    double s = (double)g_dpi / 96.0;
-    int x = mi.rcMonitor.right - g_winW - (int)(18.0 * s + 0.5);
-    int y = mi.rcMonitor.top + (int)(22.0 * s + 0.5);
-    int mw = mi.rcMonitor.right - mi.rcMonitor.left;
-    int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-    if (mw <= 0 || mh <= 0) return;
-
-    double sx = (double)iw / mw;
-    double sy = (double)ih / mh;
-    double sum = 0;
-    int cnt = 0;
-    for (int gy = 0; gy < 10; gy++) {
-        for (int gx = 0; gx < 10; gx++) {
-            int px = (int)((x + (gx + 0.5) * g_winW / 10.0) * sx);
-            int py = (int)((y + (gy + 0.5) * g_winH / 10.0) * sy);
-            if (px < 0 || py < 0 || px >= iw || py >= ih) continue;
-            Gdiplus::Color c;
-            img.GetPixel(px, py, &c);
-            sum += (c.GetR() * 299 + c.GetG() * 587 + c.GetB() * 114) / 1000.0;
-            cnt++;
+                double s = (double)g_dpi / 96.0;
+                int x = mi.rcMonitor.right - g_winW - (int)(18.0 * s + 0.5);
+                int y = mi.rcMonitor.top + (int)(22.0 * s + 0.5);
+                int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+                int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                if (mw > 0 && mh > 0) {
+                    double sx = (double)iw / mw;
+                    double sy = (double)ih / mh;
+                    double sum = 0;
+                    int cnt = 0;
+                    for (int gy = 0; gy < 10; gy++) {
+                        for (int gx = 0; gx < 10; gx++) {
+                            int px = (int)((x + (gx + 0.5) * g_winW / 10.0) * sx);
+                            int py = (int)((y + (gy + 0.5) * g_winH / 10.0) * sy);
+                            if (px < 0 || py < 0 || px >= iw || py >= ih) continue;
+                            Gdiplus::Color c;
+                            img.GetPixel(px, py, &c);
+                            sum += (c.GetR() * 299 + c.GetG() * 587 + c.GetB() * 114) / 1000.0;
+                            cnt++;
+                        }
+                    }
+                    if (cnt > 0) {
+                        g_lightText = (sum / cnt) < 118.0;
+                        ApplyPalette();
+                        haveImage = true;
+                    }
+                }
+            }
         }
     }
-    if (cnt > 0) {
-        g_lightText = (sum / cnt) < 118.0;
-        ApplyPalette();
+
+    if (!haveImage) {
+        // Solid-color desktop: HKCU\Control Panel\Colors\Background = "R G B".
+        wchar_t bg[64] = { 0 };
+        if (RegStrW(HKEY_CURRENT_USER, L"Control Panel\\Colors", L"Background", bg, 64)) {
+            int r = 0, g = 0, b = 0;
+            if (swscanf_s(bg, L"%d %d %d", &r, &g, &b) == 3) {
+                double avg = r * 0.299 + g * 0.587 + b * 0.114;
+                g_lightText = avg < 118.0;
+                ApplyPalette();
+            }
+        }
     }
+}
+
+static void LoadEmbeddedFont(HINSTANCE inst)
+{
+    HRSRC hr = FindResourceW(inst, MAKEINTRESOURCEW(IDR_FONT), MAKEINTRESOURCEW(10));
+    if (!hr) return;
+    HGLOBAL hg = LoadResource(inst, hr);
+    if (!hg) return;
+    void* data = LockResource(hg);
+    DWORD sz = SizeofResource(inst, hr);
+    if (!data || sz == 0) return;
+
+    DWORD n = 0;
+    HANDLE reg = AddFontMemResourceEx(data, sz, NULL, &n);
+    if (!reg || n == 0) return;
+    g_fontReg = reg;
+
+    g_gdipFonts = new Gdiplus::PrivateFontCollection();
+    if (!g_gdipFonts ||
+        g_gdipFonts->AddMemoryFont(data, (INT)sz) != Gdiplus::Ok) {
+        delete g_gdipFonts;
+        g_gdipFonts = NULL;
+        return;
+    }
+    g_fontReady = true;
 }
 
 static void PickFont(void)
@@ -1005,12 +1095,16 @@ static bool RenderInternal(void)
     if (bmp.GetLastStatus() != Gdiplus::Ok) return false;
     Gdiplus::Graphics g(&bmp);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    // Small fonts at 100% DPI look soft with plain AntiAlias; GridFit keeps
+    // them crisp. At 150%+ the unhinted strokes are more faithful.
+    g.SetTextRenderingHint(s >= 1.5 ? Gdiplus::TextRenderingHintAntiAlias
+                                    : Gdiplus::TextRenderingHintAntiAliasGridFit);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
     g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
     g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
-    Gdiplus::FontFamily family(g_fontName);
+    Gdiplus::FontFamily family(g_fontReady ? L"MiSans" : g_fontName,
+        g_fontReady ? g_gdipFonts : NULL);
     Gdiplus::Font fontTitle(&family, (Gdiplus::REAL)(15.0 * s), Gdiplus::FontStyleBold,
         Gdiplus::UnitPixel);
     Gdiplus::Font fontDetail(&family, (Gdiplus::REAL)(13.2 * s), Gdiplus::FontStyleRegular,
@@ -1174,10 +1268,41 @@ static void PositionWindow(void)
 }
 
 // ===========================================================================
-// Window procedure
+// Tray icon
 // ===========================================================================
 
-static void ShowContextMenu(HWND hwnd)
+static void AddTrayIcon(HWND hwnd, HINSTANCE inst)
+{
+    if (g_trayAdded || !hwnd) return;
+    memset(&g_nid, 0, sizeof(g_nid));
+    g_nid.cbSize = sizeof(g_nid);
+    g_nid.hWnd = hwnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_APP + 2;
+    int cx = GetSystemMetrics(SM_CXSMICON);
+    int cy = GetSystemMetrics(SM_CYSMICON);
+    g_nid.hIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(IDI_MAIN_ICON),
+        IMAGE_ICON, cx, cy, 0);
+    if (!g_nid.hIcon)
+        g_nid.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_MAIN_ICON));
+    wcscpy_s(g_nid.szTip, 128, L"HSpec 轻谱");
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE;
+}
+
+static void RemoveTrayIcon(void)
+{
+    if (g_trayAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_trayAdded = false;
+    }
+    if (g_nid.hIcon) {
+        DestroyIcon(g_nid.hIcon);
+        g_nid.hIcon = NULL;
+    }
+}
+
+static void ShowTrayMenu(HWND hwnd)
 {
     POINT pt;
     GetCursorPos(&pt);
@@ -1195,8 +1320,11 @@ static void ShowContextMenu(HWND hwnd)
     if (cmd == 1) {
         BuildModel();
         ComputeLayout();
+        g_wallpaperStamp = WallpaperStamp();
+        UpdateTheme();
         PositionWindow();
         Render();
+        SendToDesktopLayer();
     } else if (cmd == 2) {
         DestroyWindow(hwnd);
     }
@@ -1204,6 +1332,12 @@ static void ShowContextMenu(HWND hwnd)
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (g_taskbarCreatedMsg != 0 && msg == g_taskbarCreatedMsg) {
+        g_trayAdded = false;
+        AddTrayIcon(hwnd, (HINSTANCE)GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+        return 0;
+    }
+
     switch (msg) {
     case WM_CREATE:
         SetTimer(hwnd, 1, 60000, NULL);
@@ -1219,6 +1353,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             Render();
             SendToDesktopLayer();
         } else if (wParam == 2) {
+            ULONGLONG stamp = WallpaperStamp();
+            if (stamp != g_wallpaperStamp) {
+                g_wallpaperStamp = stamp;
+                UpdateTheme();
+                Render();
+            }
             // "Show desktop" hides ordinary top-level windows and raises the
             // desktop WorkerW stack; a desktop widget should stay on the
             // wallpaper, so restore it and keep it anchored above that stack.
@@ -1228,12 +1368,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 Render();
             }
             SendToDesktopLayer();
+        } else if (wParam == 3) {
+            KillTimer(hwnd, 3);
+            BuildModel();
+            ComputeLayout();
+            UpdateTheme();
+            PositionWindow();
+            Render();
+            SendToDesktopLayer();
         }
         return 0;
 
-    case WM_RBUTTONUP:
-        ShowContextMenu(hwnd);
+    case WM_APP + 2:
+        if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONDBLCLK)
+            ShowTrayMenu(hwnd);
         return 0;
+
+    case WM_DEVICECHANGE:
+        if (wParam == DBT_DEVNODES_CHANGED ||
+            wParam == DBT_DEVICEARRIVAL ||
+            wParam == DBT_DEVICEREMOVECOMPLETE) {
+            SetTimer(hwnd, 3, 700, NULL);
+        }
+        return TRUE;
 
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
@@ -1269,6 +1426,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 
     case WM_SETTINGCHANGE:
+        g_wallpaperStamp = WallpaperStamp();
         UpdateTheme();
         Render();
         return 0;
@@ -1290,6 +1448,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
         KillTimer(hwnd, 1);
         KillTimer(hwnd, 2);
+        KillTimer(hwnd, 3);
+        RemoveTrayIcon();
         g_hwnd = NULL;
         PostQuitMessage(0);
         return 0;
@@ -1316,6 +1476,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     if (Gdiplus::GdiplusStartup(&g_gdiToken, &gdiIn, NULL) != Gdiplus::Ok)
         return 1;
 
+    LoadEmbeddedFont(hInstance);
+    g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
     PickFont();
     BuildModel();
 
@@ -1333,7 +1495,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     }
 
     g_hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
         L"HSpecWindow", L"HSpec 轻谱", WS_POPUP,
         0, 0, 100, 100, NULL, NULL, hInstance, NULL);
     if (!g_hwnd) {
@@ -1344,10 +1506,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     g_dpi = GetDpiSafe(g_hwnd);
     ComputeLayout();
     UpdateTheme();
+    g_wallpaperStamp = WallpaperStamp();
     PositionWindow();
     ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
     Render();
     SendToDesktopLayer();
+    AddTrayIcon(g_hwnd, hInstance);
 
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
@@ -1356,6 +1520,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
     }
 
     if (mutex) CloseHandle(mutex);
+    if (g_fontReg) {
+        RemoveFontMemResourceEx(g_fontReg);
+        g_fontReg = NULL;
+    }
+    delete g_gdipFonts;
+    g_gdipFonts = NULL;
     Gdiplus::GdiplusShutdown(g_gdiToken);
     return 0;
 }
