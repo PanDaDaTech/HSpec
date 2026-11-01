@@ -827,6 +827,21 @@ static void BuildModel(void)
 
     r = ModelAddRow(ICON_RAM, memTitle);
 
+    if (g_smbios.memCount > 0) {
+        const wchar_t* mfr = g_smbios.mem[0].manufacturer;
+        if (mfr[0]) {
+            wchar_t d[256];
+            if (g_smbios.memCount > 1 && g_smbios.mem[1].manufacturer[0] &&
+                wcscmp(g_smbios.mem[1].manufacturer, mfr) != 0) {
+                WPrintf(d, 256, L"品牌: %s / %s", mfr,
+                    g_smbios.mem[1].manufacturer);
+            } else {
+                WPrintf(d, 256, L"品牌: %s", mfr);
+            }
+            ModelAddDetail(r, d);
+        }
+    }
+
     if (firstPart[0]) {
         wchar_t memDetail[256] = { 0 };
         wcsncpy_s(memDetail, 256, firstPart, _TRUNCATE);
