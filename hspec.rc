@@ -6,6 +6,9 @@ IDI_MAIN_ICON ICON "winres/hspec.ico"
 
 IDR_FONT RCDATA "winres/MiSans-Medium.ttf"
 
+IDR_GPU_IDS RCDATA "data/gpu_ids.txt"
+IDR_NIC_IDS RCDATA "data/nic_ids.txt"
+
 1 24 "hspec.manifest"
 
 VS_VERSION_INFO VERSIONINFO

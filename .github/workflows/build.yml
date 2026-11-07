@@ -34,7 +34,7 @@ jobs:
         if not exist "dist\x64" mkdir "dist\x64"
         rc /nologo /c65001 /fo "build\x64\hspec.res" "hspec.rc"
         if %errorlevel% neq 0 exit /b %errorlevel%
-        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\x64\hspec.res" /link /OUT:"dist\x64\HSpec_x64.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib user32.lib gdi32.lib
+        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\x64\hspec.res" /link /OUT:"dist\x64\HSpec_x64.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib setupapi.lib user32.lib gdi32.lib
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo [x64] Build succeeded.
 
@@ -47,7 +47,7 @@ jobs:
         if not exist "dist\x86" mkdir "dist\x86"
         rc /nologo /c65001 /fo "build\x86\hspec.res" "hspec.rc"
         if %errorlevel% neq 0 exit /b %errorlevel%
-        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\x86\hspec.res" /link /OUT:"dist\x86\HSpec_x86.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib user32.lib gdi32.lib
+        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\x86\hspec.res" /link /OUT:"dist\x86\HSpec_x86.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib setupapi.lib user32.lib gdi32.lib
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo [x86] Build succeeded.
 
@@ -60,7 +60,7 @@ jobs:
         if not exist "dist\arm64" mkdir "dist\arm64"
         rc /nologo /c65001 /fo "build\arm64\hspec.res" "hspec.rc"
         if %errorlevel% neq 0 exit /b %errorlevel%
-        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\arm64\hspec.res" /link /OUT:"dist\arm64\HSpec_arm64.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib user32.lib gdi32.lib
+        cl /nologo /utf-8 /O2 /MT /EHsc /std:c++17 /D_WIN32_WINNT=0x0601 hspec.cpp "build\arm64\hspec.res" /link /OUT:"dist\arm64\HSpec_arm64.exe" /SUBSYSTEM:WINDOWS gdiplus.lib crypt32.lib advapi32.lib shell32.lib setupapi.lib user32.lib gdi32.lib
         if %errorlevel% neq 0 exit /b %errorlevel%
         echo [arm64] Build succeeded.
 
@@ -81,4 +81,5 @@ jobs:
       with:
         name: HSpec_arm64
         path: dist/arm64/HSpec_arm64.exe
+
 

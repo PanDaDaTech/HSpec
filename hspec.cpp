@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <winioctl.h>
+#include <setupapi.h>
 #include <wincrypt.h>
 #include <objbase.h>
 #include <propidl.h>
@@ -27,6 +28,7 @@
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
@@ -806,10 +808,253 @@ static int EnumDisks(DiskInfo* out, int cap)
 }
 
 // ===========================================================================
+// GPU / network (SetupAPI + embedded PCI ID tables)
+// ===========================================================================
+
+struct IdEntry { wchar_t key[9]; wchar_t name[128]; };
+static IdEntry g_gpuIds[4096];
+static int g_gpuIdCount = 0;
+static IdEntry g_nicIds[3072];
+static int g_nicIdCount = 0;
+
+static void LoadIdTable(HINSTANCE inst, int resId, IdEntry* table, int cap, int* count)
+{
+    *count = 0;
+    HRSRC hr = FindResourceW(inst, MAKEINTRESOURCEW(resId), MAKEINTRESOURCEW(10));
+    if (!hr) return;
+    HGLOBAL hg = LoadResource(inst, hr);
+    if (!hg) return;
+    const char* p = (const char*)LockResource(hg);
+    DWORD sz = SizeofResource(inst, hr);
+    if (!p || sz == 0) return;
+    const char* end = p + sz;
+    int n = 0;
+    while (p < end && n < cap) {
+        const char* eol = p;
+        while (eol < end && *eol != '\n') eol++;
+        const char* eq = p;
+        while (eq < eol && *eq != '=') eq++;
+        if (eq < eol && (eq - p) == 8) {
+            for (int k = 0; k < 8; k++) table[n].key[k] = (wchar_t)p[k];
+            table[n].key[8] = 0;
+            int len = (int)(eol - (eq + 1));
+            if (len > 0 && eq[len] == '\r') len--;
+            if (len > 255) len = 255;
+            char tmp[256];
+            memcpy(tmp, eq + 1, len);
+            tmp[len] = 0;
+            ToWide(tmp, table[n].name, 128);
+            if (table[n].name[0]) n++;
+        }
+        p = (eol < end) ? eol + 1 : end;
+    }
+    *count = n;
+}
+
+static void LoadIdTables(HINSTANCE inst)
+{
+    LoadIdTable(inst, IDR_GPU_IDS, g_gpuIds, 4096, &g_gpuIdCount);
+    LoadIdTable(inst, IDR_NIC_IDS, g_nicIds, 3072, &g_nicIdCount);
+}
+
+static bool LookupIdTable(const IdEntry* table, int count, const wchar_t* key,
+    wchar_t* out, int cap)
+{
+    if (!key || wcslen(key) != 8) return false;
+    for (int i = 0; i < count; i++) {
+        if (wcscmp(table[i].key, key) == 0) {
+            wcsncpy_s(out, (size_t)cap, table[i].name, _TRUNCATE);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ExtractPciKey(const wchar_t* id, wchar_t* key)
+{
+    const wchar_t* v = FindNoCase((wchar_t*)id, L"VEN_");
+    const wchar_t* d = FindNoCase((wchar_t*)id, L"DEV_");
+    if (!v || !d) return false;
+    for (int i = 0; i < 4; i++) {
+        wchar_t a = v[4 + i], b = d[4 + i];
+        if (!iswxdigit(a) || !iswxdigit(b)) return false;
+        key[i] = (wchar_t)towupper(a);
+        key[4 + i] = (wchar_t)towupper(b);
+    }
+    key[8] = 0;
+    return true;
+}
+
+static void GetDeviceString(HDEVINFO devs, SP_DEVINFO_DATA* data, DWORD prop,
+    wchar_t* out, int cap)
+{
+    out[0] = 0;
+    wchar_t buf[512] = { 0 };
+    DWORD type = 0, size = 0;
+    if (SetupDiGetDeviceRegistryPropertyW(devs, data, prop, &type,
+            (PBYTE)buf, sizeof(buf), &size))
+        wcsncpy_s(out, (size_t)cap, buf, _TRUNCATE);
+}
+
+static const wchar_t* GpuVendorFallback(const wchar_t* key)
+{
+    if (!_wcsnicmp(key, L"10DE", 4)) return L"NVIDIA GPU";
+    if (!_wcsnicmp(key, L"1002", 4)) return L"AMD GPU";
+    if (!_wcsnicmp(key, L"8086", 4)) return L"Intel GPU";
+    if (!_wcsnicmp(key, L"15AD", 4)) return L"VMware GPU";
+    return L"显卡";
+}
+
+static int GpuRank(const wchar_t* name)
+{
+    static const wchar_t* discrete[] = {
+        L"GeForce", L"Radeon RX", L"Radeon Pro", L"Quadro", L"RTX", L"GTX", L"Arc"
+    };
+    for (int i = 0; i < 7; i++)
+        if (FindNoCase((wchar_t*)name, discrete[i])) return 0;
+    return 1;
+}
+
+struct GpuInfo { wchar_t name[192]; wchar_t key[9]; int rank; };
+
+static int EnumGpus(GpuInfo* out, int cap)
+{
+    GUID guid = { 0x4d36e968, 0xe325, 0x11ce,
+        { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
+    HDEVINFO devs = SetupDiGetClassDevsW(&guid, NULL, NULL, DIGCF_PRESENT);
+    if (devs == INVALID_HANDLE_VALUE) return 0;
+
+    int n = 0;
+    SP_DEVINFO_DATA data;
+    data.cbSize = sizeof(data);
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &data); i++) {
+        wchar_t id[512] = { 0 };
+        if (!SetupDiGetDeviceInstanceIdW(devs, &data, id, 512, NULL)) continue;
+        wchar_t key[9] = { 0 };
+        bool hasKey = ExtractPciKey(id, key);
+        wchar_t name[192] = { 0 };
+        if (hasKey) LookupIdTable(g_gpuIds, g_gpuIdCount, key, name, 192);
+        if (!name[0]) {
+            GetDeviceString(devs, &data, SPDRP_FRIENDLYNAME, name, 192);
+            if (!name[0]) GetDeviceString(devs, &data, SPDRP_DEVICEDESC, name, 192);
+        }
+        if (!name[0]) continue;
+        if (FindNoCase(name, L"Basic Render Driver")) continue;
+        if (FindNoCase(name, L"Microsoft Basic") && hasKey)
+            wcsncpy_s(name, 192, GpuVendorFallback(key), _TRUNCATE);
+
+        static const wchar_t* kGpuVirtual[] = {
+            L"Virtual Display", L"GameViewer", L"Spacedesk", L"Parsec",
+            L"Sunshine", L"Virtual Desktop", L"Mirror Driver",
+            L"Indirect Display"
+        };
+        bool virt = false;
+        for (int k = 0; k < 8; k++) {
+            if (FindNoCase(name, kGpuVirtual[k])) { virt = true; break; }
+        }
+        if (virt) continue;
+
+        bool dup = false;
+        for (int j = 0; j < n; j++) {
+            if ((hasKey && wcscmp(out[j].key, key) == 0) ||
+                wcscmp(out[j].name, name) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+
+        wcsncpy_s(out[n].name, 192, name, _TRUNCATE);
+        wcsncpy_s(out[n].key, 9, key, _TRUNCATE);
+        out[n].rank = GpuRank(name);
+        n++;
+        if (n >= cap) break;
+    }
+    SetupDiDestroyDeviceInfoList(devs);
+
+    // Discrete GPUs first.
+    for (int i = 1; i < n; i++) {
+        GpuInfo tmp = out[i];
+        int j = i - 1;
+        while (j >= 0 && out[j].rank > tmp.rank) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = tmp;
+    }
+    return n;
+}
+
+struct NicInfo { wchar_t name[192]; bool wireless; };
+
+static bool NameHasAny(const wchar_t* s, const wchar_t* const* words, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (FindNoCase((wchar_t*)s, words[i])) return true;
+    return false;
+}
+
+static int EnumNics(NicInfo* out, int cap)
+{
+    GUID guid = { 0x4d36e972, 0xe325, 0x11ce,
+        { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
+    HDEVINFO devs = SetupDiGetClassDevsW(&guid, NULL, NULL, DIGCF_PRESENT);
+    if (devs == INVALID_HANDLE_VALUE) return 0;
+
+    static const wchar_t* kVirtual[] = {
+        L"Virtual", L"Miniport", L"Loopback", L"WAN", L"Tunnel", L"VPN",
+        L"Bluetooth", L"Hyper-V", L"Wi-Fi Direct", L"TAP-", L"Kernel Debug"
+    };
+    static const wchar_t* kWireless[] = {
+        L"Wi-Fi", L"WiFi", L"Wireless", L"WLAN", L"802.11"
+    };
+
+    int n = 0;
+    SP_DEVINFO_DATA data;
+    data.cbSize = sizeof(data);
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &data); i++) {
+        wchar_t id[512] = { 0 };
+        if (!SetupDiGetDeviceInstanceIdW(devs, &data, id, 512, NULL)) continue;
+        if (_wcsnicmp(id, L"PCI\\", 4) != 0 && _wcsnicmp(id, L"USB\\", 4) != 0)
+            continue;
+
+        wchar_t key[9] = { 0 };
+        bool hasKey = ExtractPciKey(id, key);
+        wchar_t name[192] = { 0 };
+        if (hasKey) LookupIdTable(g_nicIds, g_nicIdCount, key, name, 192);
+        if (!name[0]) {
+            GetDeviceString(devs, &data, SPDRP_FRIENDLYNAME, name, 192);
+            if (!name[0]) GetDeviceString(devs, &data, SPDRP_DEVICEDESC, name, 192);
+        }
+        if (!name[0]) continue;
+        if (NameHasAny(name, kVirtual, 11)) continue;
+
+        bool wireless = wcsstr(id, L"CC_0280") != NULL;
+        if (!wireless) wireless = NameHasAny(name, kWireless, 5);
+
+        bool dup = false;
+        for (int j = 0; j < n; j++) {
+            if (wcscmp(out[j].name, name) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup) continue;
+
+        wcsncpy_s(out[n].name, 192, name, _TRUNCATE);
+        out[n].wireless = wireless;
+        n++;
+        if (n >= cap) break;
+    }
+    SetupDiDestroyDeviceInfoList(devs);
+    return n;
+}
+
+// ===========================================================================
 // UI model
 // ===========================================================================
 
-enum IconKind { ICON_CPU = 0, ICON_BOARD, ICON_RAM, ICON_DISK };
+enum IconKind { ICON_CPU = 0, ICON_BOARD, ICON_RAM, ICON_DISK, ICON_GPU, ICON_NET };
 
 struct UiRow
 {
@@ -1004,6 +1249,15 @@ static void BuildModel(void)
         }
     }
 
+    // ---- GPU ----
+    GpuInfo gpus[4];
+    int gc = EnumGpus(gpus, 4);
+    for (int i = 0; i < gc; i++) {
+        wchar_t title[256];
+        WPrintf(title, 256, L"显卡: %s", gpus[i].name);
+        ModelAddRow(ICON_GPU, title);
+    }
+
     // ---- Disks ----
     DiskInfo disks[8];
     memset(disks, 0, sizeof(disks));
@@ -1023,6 +1277,16 @@ static void BuildModel(void)
                 capText, disks[i].style, disks[i].bus);
             ModelAddDetail(r, d);
         }
+    }
+
+    // ---- Network ----
+    NicInfo nics[8];
+    int nc = EnumNics(nics, 8);
+    for (int i = 0; i < nc; i++) {
+        wchar_t title[256];
+        WPrintf(title, 256, L"网卡: %s", nics[i].name);
+        r = ModelAddRow(ICON_NET, title);
+        ModelAddDetail(r, nics[i].wireless ? L"类型: 无线" : L"类型: 有线");
     }
 }
 
@@ -1222,7 +1486,7 @@ static void ComputeLayout(void)
     g_detailH = (int)(22.0 * s + 0.5);
     g_rowGap = (int)(9.0 * s + 0.5);
     g_padTop = (int)(4.0 * s + 0.5);
-    g_winW = (int)(388.0 * s + 0.5);
+    g_winW = (int)(480.0 * s + 0.5);
 
     int h = g_padTop;
     for (int i = 0; i < g_rowCount; i++)
@@ -1295,6 +1559,22 @@ static void DrawGlyph(Gdiplus::Graphics& g, Gdiplus::Pen& pen, int kind,
         g.DrawEllipse(&pen, x + 6 * u, y + 9 * u, 6 * u, 6 * u);
         g.DrawLine(&pen, x + 15 * u, y + 9 * u, x + 19 * u, y + 9 * u);
         g.DrawLine(&pen, x + 15 * u, y + 13 * u, x + 19 * u, y + 13 * u);
+        break;
+    }
+    case ICON_NET: {
+        // Network: globe with two meridians.
+        g.DrawEllipse(&pen, x + 3 * u, y + 3 * u, 18 * u, 18 * u);
+        g.DrawLine(&pen, x + 3 * u, y + 12 * u, x + 21 * u, y + 12 * u);
+        g.DrawEllipse(&pen, x + 8 * u, y + 3 * u, 8 * u, 18 * u);
+        break;
+    }
+    case ICON_GPU: {
+        // Display: monitor with stand.
+        Gdiplus::GraphicsPath p;
+        AddRoundRect(p, Gdiplus::RectF(x + 2 * u, y + 4 * u, 20 * u, 13 * u), 2 * u);
+        g.DrawPath(&pen, &p);
+        g.DrawLine(&pen, x + 12 * u, y + 17 * u, x + 12 * u, y + 20 * u);
+        g.DrawLine(&pen, x + 8 * u, y + 20 * u, x + 16 * u, y + 20 * u);
         break;
     }
     default: break;
@@ -1864,6 +2144,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
         return 1;
 
     LoadEmbeddedFont(hInstance);
+    LoadIdTables(hInstance);
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
     BuildModel();
 

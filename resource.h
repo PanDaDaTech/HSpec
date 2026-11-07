@@ -1,6 +1,8 @@
 // resource.h
 #define IDI_MAIN_ICON 101
 #define IDR_FONT 102
+#define IDR_GPU_IDS 103
+#define IDR_NIC_IDS 104
 
 #define VER_FILEVERSION     1,0,0,0
 #define VER_FILEVERSION_STR "1.0"
